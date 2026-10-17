@@ -108,6 +108,8 @@ FMobCloud MobCloudPassLayer(int Index)
 	Cloud.PixelAngle = PixelAngle;
 	Cloud.MacroScale = LayerG[Index].x;
 	Cloud.MacroAmount = LayerG[Index].y;
+	Cloud.Shear = LayerG[Index].z;
+	Cloud.Variety = LayerG[Index].w;
 	Cloud.ScatterColor = LayerScatter[Index].rgb;
 	Cloud.EmissiveColor = LayerEmissive[Index].rgb;
 	Cloud.UseDetail = LayerFlags[Index].x;

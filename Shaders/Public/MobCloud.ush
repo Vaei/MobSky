@@ -115,6 +115,12 @@ struct FMobCloud
 	float MacroScale;
 	float MacroAmount;
 
+	/** World units a cloud's top is carried downwind per unit it stands above its base. */
+	float Shear;
+
+	/** How far the kind of cloud wanders across the sky, from flat sheets to towers. 0 is fair weather cumulus everywhere. */
+	float Variety;
+
 	float3 ScatterColor;
 	float3 EmissiveColor;
 
@@ -138,26 +144,49 @@ float MobCloudHeightFraction(float3 World, FMobCloud Cloud)
 	return (World.z + Lift - Cloud.Base) / max(Cloud.Top - Cloud.Base, 1.0f);
 }
 
+/** The way the wind blows, as a unit vector. */
+float2 MobCloudWindDir(FMobCloud Cloud)
+{
+	return Cloud.Wind / max(length(Cloud.Wind), 1e-3f);
+}
+
 /**
- * Where the weather is: how much cloud stands over a point, and how tall it grows.
+ * Where the weather is: how much cloud stands over a point, how tall it grows, and what kind it is.
  *
  * Red is cells, so the sky breaks into separate clouds rather than a sheet; green is how tall each
- * grows. A second, larger and turned tile of red is multiplied in, or the repeat shows from orbit.
+ * grows. A larger and turned tile is read for broad regions of fair and foul weather, or the repeat
+ * shows from orbit, and another for the kind: 0 is a flat sheet of stratocumulus, 0.5 fair weather
+ * cumulus, 1 a towering one.
  */
-float2 MobCloudWeather(float2 WorldXY, float Footprint, FMobCloud Cloud, Texture2D WeatherTex, SamplerState WeatherSampler)
+float3 MobCloudWeather(float2 WorldXY, float Footprint, FMobCloud Cloud, Texture2D WeatherTex, SamplerState WeatherSampler)
 {
 	const float Lod = MobCloudLod(Footprint, Cloud.CoverageScale, MOB_CLOUD_WEATHER_TEXELS, 8.0f);
-	const float2 UV = (WorldXY + Cloud.Wind * Cloud.Time * 0.5f) / max(Cloud.CoverageScale, 1.0f);
+	float2 UV = (WorldXY + Cloud.Wind * Cloud.Time * 0.5f) / max(Cloud.CoverageScale, 1.0f);
 	const float2 FarUV = float2(UV.x * 0.8f - UV.y * 0.6f, UV.x * 0.6f + UV.y * 0.8f) * 0.21f;
+	const float FarLod = max(Lod - 2.0f, 0.0f);
+
+	const float4 Far = WeatherTex.SampleLevel(WeatherSampler, FarUV, FarLod);
+	const float Region = lerp(0.6f, 1.25f, Far.b);
+	const float Type = saturate(0.5f + (WeatherTex.SampleLevel(WeatherSampler,
+		float2(UV.x * 0.5f + UV.y * 0.87f, UV.y * 0.5f - UV.x * 0.87f) * 0.13f + 0.37f, FarLod).g - 0.5f) * 2.4f * Cloud.Variety);
+
+	// Fair weather cells line up along the wind into streets.
+	const float2 WindDir = MobCloudWindDir(Cloud);
+	UV -= WindDir * dot(UV, WindDir) * 0.35f * Cloud.Variety;
+
+	// Warped by a finer, turned read of the same map, so a cell comes out ragged rather than as a round blot.
+	const float2 Warp = WeatherTex.SampleLevel(WeatherSampler,
+		float2(UV.x * 0.6f + UV.y * 0.8f, UV.y * 0.6f - UV.x * 0.8f) * 2.3f + 0.61f, Lod).gb - 0.5f;
+	UV += Warp * 0.09f;
 
 	const float2 Near = WeatherTex.SampleLevel(WeatherSampler, UV, Lod).rg;
-	const float Region = lerp(0.6f, 1.25f, WeatherTex.SampleLevel(WeatherSampler, FarUV, max(Lod - 2.0f, 0.0f)).b);
 
 	// Storms and clear sky at the scale of the planet, in alpha, drifting slower than the clouds in them.
 	const float2 MacroUV = (WorldXY + Cloud.Wind * Cloud.Time * 0.2f) / max(Cloud.MacroScale, 1.0f);
 	const float Macro = WeatherTex.SampleLevel(WeatherSampler, MacroUV,
 		MobCloudLod(Footprint, Cloud.MacroScale, MOB_CLOUD_WEATHER_TEXELS, 8.0f)).a;
-	const float Coverage = saturate(Cloud.Coverage + (Macro - 0.5f) * 2.0f * Cloud.MacroAmount);
+	// Sheets close up and towers stand apart.
+	const float Coverage = saturate(Cloud.Coverage + (Macro - 0.5f) * 2.0f * Cloud.MacroAmount + (0.5f - Type) * 0.35f);
 
 	// Coverage slides the threshold the cells are cut at, and the band is wide enough that a cell's
 	// core always reaches full weather.
@@ -166,7 +195,7 @@ float2 MobCloudWeather(float2 WorldXY, float Footprint, FMobCloud Cloud, Texture
 
 	// Once a pixel spans several cells a threshold only aliases; what it should show is the share of
 	// them that are cloud, which is the coverage itself.
-	return float2(lerp(Cover, Coverage, saturate((Lod - 1.0f) / 3.0f)), Near.g);
+	return float3(lerp(Cover, Coverage, saturate((Lod - 1.0f) / 3.0f)), Near.g, Type);
 }
 
 /**
@@ -174,24 +203,27 @@ float2 MobCloudWeather(float2 WorldXY, float Footprint, FMobCloud Cloud, Texture
  *
  * The weather first because it is one 2D tap and is zero over most of a clear sky, and a zero there
  * means the volume taps are never paid for. Local is the point in the volume's unit frame, which only
- * a volume reads.
+ * a volume reads. OutRise is how far up its own cloud the point is, 0 at the base and 1 at the top.
  */
-float MobCloudDensityAt(float3 World, float3 Local, float Footprint, FMobCloud Cloud, bool bDetail,
+float MobCloudDensityRise(float3 World, float3 Local, float Footprint, FMobCloud Cloud, bool bDetail,
 	Texture3D ShapeTex, SamplerState ShapeSampler,
 	Texture3D DetailTex, SamplerState DetailSampler,
-	Texture2D WeatherTex, SamplerState WeatherSampler)
+	Texture2D WeatherTex, SamplerState WeatherSampler, out float OutRise)
 {
-	const float3 Drift = float3(Cloud.Wind * Cloud.Time, 0.0f);
+	OutRise = 0.0f;
+	float3 Drift = float3(Cloud.Wind * Cloud.Time, 0.0f);
 
-	float Profile;
-	float Weather;
+	float Profile = 0.0f;
+	float Weather = 0.0f;
 	float H;
+	float Squash = 1.0f;
 	if (Cloud.IsVolume > 0.5f)
 	{
 		// A ball of cloud: full in the middle and gone at the rim, with the noise doing the rest.
 		Profile = saturate((1.0f - length(Local)) / max(Cloud.EdgeFade, 1e-3f));
 		Weather = Cloud.Coverage;
 		H = saturate(Local.z * 0.5f + 0.5f);
+		OutRise = H;
 	}
 	else
 	{
@@ -201,28 +233,51 @@ float MobCloudDensityAt(float3 World, float3 Local, float Footprint, FMobCloud C
 			return 0.0f;
 		}
 
-		const float2 Here = MobCloudWeather(World.xy, Footprint, Cloud, WeatherTex, WeatherSampler);
+		// The wind is stronger aloft, so a cloud's upper part is carried downwind of its base, and the
+		// noise with it, or the tower would lean while its billows stood still.
+		const float2 Sheared = MobCloudWindDir(Cloud) * (Cloud.Shear * H * (Cloud.Top - Cloud.Base));
+		Drift.xy -= Sheared;
+
+		const float3 Here = MobCloudWeather(World.xy - Sheared, Footprint, Cloud, WeatherTex, WeatherSampler);
 		Weather = Here.x;
 		if (Weather <= 0.0f)
 		{
 			return 0.0f;
 		}
+		const float Type = Here.z;
+		const float Towering = smoothstep(0.6f, 1.0f, Type);
+		const float Sheet = 1.0f - smoothstep(0.0f, 0.45f, Type);
 
-		// Each cloud has its own top, taller where the weather is heavier. A flat base, and a top that
-		// rounds over rather than being cut.
-		const float Tallest = lerp(0.25f, 1.0f, saturate(Here.y * 1.3f)) * lerp(0.55f, 1.0f, Weather);
-		const float Bottom = saturate(H / max(Cloud.BottomFade, 1e-3f));
-		const float Top = saturate((Tallest - H) / max(Cloud.TopFade * Tallest, 1e-3f));
+		// Each cloud has its own top, from the kind it is and how heavy its weather, and lighter cloud
+		// at a cell's edge stops short of its core, which rounds the cell into a dome.
+		const float Grow = saturate(Here.y * 1.3f);
+		const float Tallest = lerp(lerp(lerp(0.25f, 0.55f, Grow), lerp(0.12f, 0.25f, Grow), Sheet),
+			lerp(0.65f, 1.0f, Grow), Towering) * lerp(0.45f, 1.0f, Weather);
+		const float Rise = H / Tallest;
+		OutRise = saturate(Rise);
+
+		// Cumulus sits on a flat base at the condensation level; a sheet is rounded under as over.
+		const float BottomFade = lerp(Cloud.BottomFade, Tallest * 0.35f, Sheet);
+		const float Bottom = saturate(H / max(BottomFade, 1e-3f));
+		const float Top = saturate((1.0f - Rise) / max(Cloud.TopFade, 1e-3f));
+
+		// The cell narrows as it climbs, and a tower that reaches the top spreads into an anvil.
+		const float Anvil = Towering * smoothstep(0.7f, 0.95f, Rise) * saturate(Grow * 2.0f - 1.0f);
+		Weather = saturate(Weather * (1.0f - 0.45f * Rise * Rise) + Anvil * 0.5f);
 		Profile = Bottom * Top * Top;
+
+		// Sheets billow flat; towers boil up in rounder heads.
+		Squash = lerp(lerp(1.0f, 2.2f, Sheet), 0.85f, Towering);
 	}
 
-	if (Profile <= 0.0f)
+	if (Profile <= 0.0f || Weather <= 0.0f)
 	{
 		return 0.0f;
 	}
 
+	const float3 ShapeAt = (World + Drift) * float3(1.0f, 1.0f, Squash);
 	const float4 Shape = ShapeTex.SampleLevel(ShapeSampler,
-		(World + Drift) / max(Cloud.ShapeScale, 1.0f), MobCloudLod(Footprint, Cloud.ShapeScale, MOB_CLOUD_SHAPE_TEXELS, 5.0f));
+		ShapeAt / max(Cloud.ShapeScale, 1.0f), MobCloudLod(Footprint, Cloud.ShapeScale, MOB_CLOUD_SHAPE_TEXELS, 5.0f));
 
 	// Perlin-Worley in red carved by the Worley octaves in the rest: the billows come from red, the
 	// cauliflower edges from the carving.
@@ -243,11 +298,21 @@ float MobCloudDensityAt(float3 World, float3 Local, float Footprint, FMobCloud C
 		const float Fine = dot(Detail, float3(0.625f, 0.25f, 0.125f));
 
 		// Wispy underneath, where cloud is being torn away, and billowed on top, where it is building.
-		const float Erode = lerp(1.0f - Fine, Fine, saturate(H * 4.0f)) * Cloud.DetailAmount * DetailWeight;
+		const float Erode = lerp(1.0f - Fine, Fine, saturate(OutRise * 2.5f)) * Cloud.DetailAmount * DetailWeight;
 		D = saturate(MobCloudRemap(D, Erode, 1.0f, 0.0f, 1.0f));
 	}
 
 	return D;
+}
+
+float MobCloudDensityAt(float3 World, float3 Local, float Footprint, FMobCloud Cloud, bool bDetail,
+	Texture3D ShapeTex, SamplerState ShapeSampler,
+	Texture3D DetailTex, SamplerState DetailSampler,
+	Texture2D WeatherTex, SamplerState WeatherSampler)
+{
+	float Rise;
+	return MobCloudDensityRise(World, Local, Footprint, Cloud, bDetail,
+		ShapeTex, ShapeSampler, DetailTex, DetailSampler, WeatherTex, WeatherSampler, Rise);
 }
 
 /** How much of the key light survives the trip in, from a point, without the detail noise. */
@@ -463,8 +528,9 @@ float4 MobCloudMarch(float3 PixelCamRel, float3 SurfaceCamRel, float3 CentreCamR
 		const float Footprint = T * PixelAngle;
 		const bool bDetail = bDense && Cloud.UseDetail > 0.5f;
 
-		const float D = MobCloudDensityAt(World, Local, Footprint, Cloud, bDetail,
-			ShapeTex, ShapeSampler, DetailTex, DetailSampler, WeatherTex, WeatherSampler);
+		float Rise;
+		const float D = MobCloudDensityRise(World, Local, Footprint, Cloud, bDetail,
+			ShapeTex, ShapeSampler, DetailTex, DetailSampler, WeatherTex, WeatherSampler, Rise);
 
 		if (!bDense)
 		{
@@ -495,9 +561,8 @@ float4 MobCloudMarch(float3 PixelCamRel, float3 SurfaceCamRel, float3 CentreCamR
 
 			const float Powder = lerp(1.0f - Cloud.Powder * exp2(-D * 6.0f), 1.0f, PowderView);
 
-			const float H = Cloud.IsVolume > 0.5f ? saturate(Local.z * 0.5f + 0.5f)
-				: saturate(MobCloudHeightFraction(World, Cloud));
-			const float3 Ambient = Cloud.Ambient * lerp(Cloud.AmbientBottom, 1.0f, H * H);
+			// By the height up its own cloud, so a short cloud's top is lit as a top and not as the deck's underside.
+			const float3 Ambient = Cloud.Ambient * lerp(Cloud.AmbientBottom, 1.0f, Rise * Rise);
 			const float3 Source = (Sun * Lit * Powder + Ambient) * Cloud.ScatterColor + Cloud.EmissiveColor;
 
 			const float StepTransmittance = exp2(-Sigma * StepLength);

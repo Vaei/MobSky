@@ -163,7 +163,7 @@ FMobCloudPacked UMobCloudComponent::Pack() const
 	Packed.D = FLinearColor(MaxDistance, ReachPerHeight, static_cast<float>(FMath::Clamp(StepCount, 4, 96)), PlanetRadius);
 	Packed.E = FLinearColor(PhaseForward, PhaseBack, PhaseBlend, AmbientBottom);
 	Packed.F = FLinearColor(ShadowDistance, EdgeFade, HazeDistance, Powder);
-	Packed.G = FLinearColor(FMath::Max(MacroScale, 100000.f), bVolume ? 0.f : MacroAmount, 0.f, 0.f);
+	Packed.G = FLinearColor(FMath::Max(MacroScale, 100000.f), bVolume ? 0.f : MacroAmount, bVolume ? 0.f : Shear, bVolume ? 0.f : Variety);
 	Packed.Scatter = ScatterColor;
 	Packed.Emissive = EmissiveColor;
 	Packed.Extent = FLinearColor(Bound.X, Bound.Y, Bound.Z, 0.f);

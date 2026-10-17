@@ -99,6 +99,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Cloud", meta=(UIMin="0", UIMax="1", ClampMin="0", ClampMax="1", EditCondition="Shape==EMobCloudShape::Layer", EditConditionHides))
 	float MacroAmount = 0.8f;
 
+	/**
+	 * How far the kind of cloud wanders across the sky: flat sheets of stratocumulus where the weather is
+	 * settled, towers with anvils where it is not, fair weather cumulus between. 0 is cumulus everywhere.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Cloud", meta=(UIMin="0", UIMax="1", ClampMin="0", ClampMax="1", EditCondition="Shape==EMobCloudShape::Layer", EditConditionHides))
+	float Variety = 0.6f;
+
+	/** How far a cloud's top is carried downwind for each unit it stands above its base, so towers lean with the wind. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Cloud", meta=(UIMin="0", UIMax="1.5", ClampMin="0", EditCondition="Shape==EMobCloudShape::Layer", EditConditionHides))
+	float Shear = 0.3f;
+
 	/** How much of the layer's height the underside rounds off over. Small is a flat base. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Cloud", meta=(UIMin="0.01", UIMax="1", ClampMin="0.01", EditCondition="Shape==EMobCloudShape::Layer", EditConditionHides))
 	float BottomFade = 0.05f;

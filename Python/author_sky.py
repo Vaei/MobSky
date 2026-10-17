@@ -183,6 +183,8 @@ Cloud.Air = Haze.a;
 Cloud.PixelAngle = 2.0f / (View.ViewSizeAndInvSize.y * View.ViewToClip[1][1]);
 Cloud.MacroScale = G.x;
 Cloud.MacroAmount = G.y;
+Cloud.Shear = G.z;
+Cloud.Variety = G.w;
 Cloud.Time = TimeValue;
 Cloud.CamWorld = CamWorld;
 Cloud.KeyDir = normalize(KeyDir + float3(0.0f, 0.0f, 1e-5f));
@@ -260,8 +262,8 @@ def build_cloud_material():
                      'Phase forward, phase back, phase blend, ambient bottom.'),
         'F': _vector(mat, 'CloudF', (200000, 0.4, 4000000, 0.6), group, 0, 1300,
                      'Shadow distance, edge fade, haze distance, powder.'),
-        'G': _vector(mat, 'CloudG', (60000000, 0.8, 0, 0), group, 0, 1330,
-                     'Macro weather scale, macro weather amount.'),
+        'G': _vector(mat, 'CloudG', (60000000, 0.8, 0.3, 0.6), group, 0, 1330,
+                     'Macro weather scale, macro weather amount, shear, variety.'),
     }
     scatter = _mask(mat, _vector(mat, 'ScatterColor', (1, 1, 1, 1), group, 0, 1360), 'rgb', 100, 1360)
     emissive = _mask(mat, _vector(mat, 'EmissiveColor', (0, 0, 0, 1), group, 0, 1420), 'rgb', 100, 1420)
