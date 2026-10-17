@@ -1,0 +1,545 @@
+// Copyright (c) Jared Taylor
+
+// Clouds for the mobile forward rendering path.
+//
+// A sibling of MobLights' fog: a proxy is rasterised, the view ray is marched between where it enters
+// and leaves the cloud, and the result comes back premultiplied. What fog does not have is shape in
+// three dimensions and light that has to find its way in, so the density here comes from a weather
+// map and volume noise, and every step that lands in cloud looks a short way towards the sun.
+//
+// Positions arrive camera relative, as they do in MobFog.ush. A layer is a slab in world Z that
+// follows the camera; a volume is an ellipsoid that stays where it was put (nebulae, set piece banks).
+
+#pragma once
+
+#include "/MobLights/Public/MobFog.ush"
+
+// Below this the ray has been swallowed and the rest of the march cannot change the pixel.
+#define MOB_CLOUD_MIN_TRANSMITTANCE 0.01f
+
+// How many taps the look towards the sun takes. A compile time constant so the loop unrolls.
+#define MOB_CLOUD_SHADOW_TAPS 4
+
+// Texels across one tile of the shape noise, for the mip choice only.
+#define MOB_CLOUD_SHAPE_TEXELS 128.0f
+
+// Texels across one tile of the detail noise and the weather map, for their mip choice.
+#define MOB_CLOUD_DETAIL_TEXELS 32.0f
+#define MOB_CLOUD_WEATHER_TEXELS 512.0f
+
+/**
+ * The mip a texture wants where one pixel spans Footprint world units, over a tile of Scale.
+ *
+ * From the pixel's footprint rather than the step length: a distant cloud read at a finer mip than its
+ * pixels can show does not look detailed, it sparkles, and the sparkle is the same every frame, so no
+ * temporal filter can take it out.
+ */
+float MobCloudLod(float Footprint, float Scale, float Texels, float MaxLod)
+{
+	return clamp(log2(max(Footprint / max(Scale, 1.0f) * Texels, 1.0f)), 0.0f, MaxLod);
+}
+
+struct FMobCloud
+{
+	/** World Z the layer starts and ends at. A volume ignores both. */
+	float Base;
+	float Top;
+
+	/** Extinction per world unit at full density, base two. */
+	float Density;
+
+	/** How much of the sky is cloud, 0 to 1. The weather. */
+	float Coverage;
+
+	/** World units one tile of the weather map, the shape noise and the detail noise cover. */
+	float CoverageScale;
+	float ShapeScale;
+	float DetailScale;
+
+	/** How much the detail noise erodes the edges. */
+	float DetailAmount;
+
+	/** World units a second the cloud drifts. */
+	float2 Wind;
+
+	/** How much of the layer's height the bottom and the top round off over, as fractions. */
+	float BottomFade;
+	float TopFade;
+
+	/** Horizontal reach of a layer at the layer's own height, and how much further it reaches per unit of height above it. */
+	float MaxDistance;
+	float ReachPerHeight;
+
+	/** Radius of the planet under the layer, which bends it down towards the horizon. */
+	float PlanetRadius;
+
+	/** Seconds, from the fog's clock. */
+	float Time;
+
+	/** The camera's own world position. */
+	float3 CamWorld;
+
+	/** Direction towards the key light, its colour, and the ambient. */
+	float3 KeyDir;
+	float3 KeyColor;
+	float3 Ambient;
+
+	/** Dual lobe phase: forward g, back g, and how much of the back lobe. */
+	float PhaseForward;
+	float PhaseBack;
+	float PhaseBlend;
+
+	/** How much of the ambient reaches the underside, relative to the top. */
+	float AmbientBottom;
+
+	/** World units the look towards the sun reaches. */
+	float ShadowDistance;
+
+	/** How much of a volume's radius its density fades out across. */
+	float EdgeFade;
+
+	/** World units of air at full density over which a cloud has faded halfway into the horizon. */
+	float HazeDistance;
+
+	/** How much the thin edges of a cloud darken seen away from the sun. */
+	float Powder;
+
+	/** The horizon's colour, and how much air there is to haze through. */
+	float3 HazeColor;
+	float Air;
+
+	/** How much sky one pixel covers, in radians, which with the distance along a ray is how big a pixel is there. */
+	float PixelAngle;
+
+	/** World units one tile of the planet scale weather spans, and how far it may push the coverage either way. */
+	float MacroScale;
+	float MacroAmount;
+
+	float3 ScatterColor;
+	float3 EmissiveColor;
+
+	float UseDetail;
+	float UseShadow;
+	float IsVolume;
+};
+
+float MobCloudRemap(float X, float A, float B, float C, float D)
+{
+	return C + (X - A) / max(B - A, 1e-4f) * (D - C);
+}
+
+/** How far a point is into the layer, 0 at the base and 1 at the top, with the planet bending it away. */
+float MobCloudHeightFraction(float3 World, FMobCloud Cloud)
+{
+	// The ground curves away under a flat world, so a point at the same Z further off is higher above
+	// it. Lifting the point is what bends the layer down to the horizon.
+	const float2 Across = World.xy - Cloud.CamWorld.xy;
+	const float Lift = dot(Across, Across) / (2.0f * max(Cloud.PlanetRadius, 1.0f));
+	return (World.z + Lift - Cloud.Base) / max(Cloud.Top - Cloud.Base, 1.0f);
+}
+
+/**
+ * Where the weather is: how much cloud stands over a point, and how tall it grows.
+ *
+ * Red is cells, so the sky breaks into separate clouds rather than a sheet; green is how tall each
+ * grows. A second, larger and turned tile of red is multiplied in, or the repeat shows from orbit.
+ */
+float2 MobCloudWeather(float2 WorldXY, float Footprint, FMobCloud Cloud, Texture2D WeatherTex, SamplerState WeatherSampler)
+{
+	const float Lod = MobCloudLod(Footprint, Cloud.CoverageScale, MOB_CLOUD_WEATHER_TEXELS, 8.0f);
+	const float2 UV = (WorldXY + Cloud.Wind * Cloud.Time * 0.5f) / max(Cloud.CoverageScale, 1.0f);
+	const float2 FarUV = float2(UV.x * 0.8f - UV.y * 0.6f, UV.x * 0.6f + UV.y * 0.8f) * 0.21f;
+
+	const float2 Near = WeatherTex.SampleLevel(WeatherSampler, UV, Lod).rg;
+	const float Region = lerp(0.6f, 1.25f, WeatherTex.SampleLevel(WeatherSampler, FarUV, max(Lod - 2.0f, 0.0f)).b);
+
+	// Storms and clear sky at the scale of the planet, in alpha, drifting slower than the clouds in them.
+	const float2 MacroUV = (WorldXY + Cloud.Wind * Cloud.Time * 0.2f) / max(Cloud.MacroScale, 1.0f);
+	const float Macro = WeatherTex.SampleLevel(WeatherSampler, MacroUV,
+		MobCloudLod(Footprint, Cloud.MacroScale, MOB_CLOUD_WEATHER_TEXELS, 8.0f)).a;
+	const float Coverage = saturate(Cloud.Coverage + (Macro - 0.5f) * 2.0f * Cloud.MacroAmount);
+
+	// Coverage slides the threshold the cells are cut at, and the band is wide enough that a cell's
+	// core always reaches full weather.
+	const float Threshold = 1.0f - Coverage;
+	const float Cover = smoothstep(Threshold - 0.15f, Threshold + 0.25f, Near.r * Region);
+
+	// Once a pixel spans several cells a threshold only aliases; what it should show is the share of
+	// them that are cloud, which is the coverage itself.
+	return float2(lerp(Cover, Coverage, saturate((Lod - 1.0f) / 3.0f)), Near.g);
+}
+
+/**
+ * Density at a point, before the extinction scale.
+ *
+ * The weather first because it is one 2D tap and is zero over most of a clear sky, and a zero there
+ * means the volume taps are never paid for. Local is the point in the volume's unit frame, which only
+ * a volume reads.
+ */
+float MobCloudDensityAt(float3 World, float3 Local, float Footprint, FMobCloud Cloud, bool bDetail,
+	Texture3D ShapeTex, SamplerState ShapeSampler,
+	Texture3D DetailTex, SamplerState DetailSampler,
+	Texture2D WeatherTex, SamplerState WeatherSampler)
+{
+	const float3 Drift = float3(Cloud.Wind * Cloud.Time, 0.0f);
+
+	float Profile;
+	float Weather;
+	float H;
+	if (Cloud.IsVolume > 0.5f)
+	{
+		// A ball of cloud: full in the middle and gone at the rim, with the noise doing the rest.
+		Profile = saturate((1.0f - length(Local)) / max(Cloud.EdgeFade, 1e-3f));
+		Weather = Cloud.Coverage;
+		H = saturate(Local.z * 0.5f + 0.5f);
+	}
+	else
+	{
+		H = MobCloudHeightFraction(World, Cloud);
+		if (H <= 0.0f || H >= 1.0f)
+		{
+			return 0.0f;
+		}
+
+		const float2 Here = MobCloudWeather(World.xy, Footprint, Cloud, WeatherTex, WeatherSampler);
+		Weather = Here.x;
+		if (Weather <= 0.0f)
+		{
+			return 0.0f;
+		}
+
+		// Each cloud has its own top, taller where the weather is heavier. A flat base, and a top that
+		// rounds over rather than being cut.
+		const float Tallest = lerp(0.25f, 1.0f, saturate(Here.y * 1.3f)) * lerp(0.55f, 1.0f, Weather);
+		const float Bottom = saturate(H / max(Cloud.BottomFade, 1e-3f));
+		const float Top = saturate((Tallest - H) / max(Cloud.TopFade * Tallest, 1e-3f));
+		Profile = Bottom * Top * Top;
+	}
+
+	if (Profile <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	const float4 Shape = ShapeTex.SampleLevel(ShapeSampler,
+		(World + Drift) / max(Cloud.ShapeScale, 1.0f), MobCloudLod(Footprint, Cloud.ShapeScale, MOB_CLOUD_SHAPE_TEXELS, 5.0f));
+
+	// Perlin-Worley in red carved by the Worley octaves in the rest: the billows come from red, the
+	// cauliflower edges from the carving.
+	const float Fbm = Shape.g * 0.625f + Shape.b * 0.25f + Shape.a * 0.125f;
+	const float Base = saturate(MobCloudRemap(Shape.r, Fbm - 1.0f, 1.0f, 0.0f, 1.0f));
+
+	// Coverage carves the shape rather than scaling it, so the cloud keeps its form and loses its edge.
+	float D = saturate(MobCloudRemap(Base * Profile, 1.0f - Weather, 1.0f, 0.0f, 1.0f)) * Weather;
+
+	// Detail fades out as a pixel grows past a couple of its texels, rather than aliasing.
+	const float DetailTexel = Cloud.DetailScale / MOB_CLOUD_DETAIL_TEXELS;
+	const float DetailWeight = saturate(2.0f - Footprint / max(DetailTexel * 2.0f, 1.0f));
+	if (bDetail && D > 0.0f && DetailWeight > 0.0f)
+	{
+		const float3 Detail = DetailTex.SampleLevel(DetailSampler,
+			(World + Drift * 1.5f) / max(Cloud.DetailScale, 1.0f),
+			MobCloudLod(Footprint, Cloud.DetailScale, MOB_CLOUD_DETAIL_TEXELS, 3.0f)).rgb;
+		const float Fine = dot(Detail, float3(0.625f, 0.25f, 0.125f));
+
+		// Wispy underneath, where cloud is being torn away, and billowed on top, where it is building.
+		const float Erode = lerp(1.0f - Fine, Fine, saturate(H * 4.0f)) * Cloud.DetailAmount * DetailWeight;
+		D = saturate(MobCloudRemap(D, Erode, 1.0f, 0.0f, 1.0f));
+	}
+
+	return D;
+}
+
+/** How much of the key light survives the trip in, from a point, without the detail noise. */
+float MobCloudShadow(float3 World, float3 Local, float3 LocalStep, FMobCloud Cloud,
+	Texture3D ShapeTex, SamplerState ShapeSampler,
+	Texture3D DetailTex, SamplerState DetailSampler,
+	Texture2D WeatherTex, SamplerState WeatherSampler)
+{
+	float Depth = 0.0f;
+	float Travelled = 0.0f;
+
+	// Doubling steps: the near ones resolve the cloud's own edge, the far ones catch the tower
+	// standing between the point and the sun.
+	float Step = Cloud.ShadowDistance / 15.0f;
+
+	UNROLL
+	for (int Tap = 0; Tap < MOB_CLOUD_SHADOW_TAPS; ++Tap)
+	{
+		const float At = Travelled + Step * 0.5f;
+		const float3 P = World + Cloud.KeyDir * At;
+		const float3 L = Local + LocalStep * At;
+		Depth += MobCloudDensityAt(P, L, Step, Cloud, false,
+			ShapeTex, ShapeSampler, DetailTex, DetailSampler, WeatherTex, WeatherSampler) * Step;
+		Travelled += Step;
+		Step *= 2.0f;
+	}
+
+	const float Optical = Depth * Cloud.Density;
+
+	// A second, softer octave stands in for light that scattered more than once. Without it the
+	// shadowed side of a cumulus goes black, which real ones never do.
+	return max(exp2(-Optical), 0.25f * exp2(-0.25f * Optical));
+}
+
+/** Slab entry and exit along a ray from the camera. */
+bool MobCloudRaySlab(float3 Dir, float CamZ, float Lo, float Hi, out float T0, out float T1)
+{
+	if (abs(Dir.z) < 1e-5f)
+	{
+		T0 = 0.0f;
+		T1 = 1e12f;
+		return CamZ > Lo && CamZ < Hi;
+	}
+
+	const float A = (Lo - CamZ) / Dir.z;
+	const float B = (Hi - CamZ) / Dir.z;
+	T0 = max(min(A, B), 0.0f);
+	T1 = max(A, B);
+	return T1 > T0;
+}
+
+/**
+ * The march's offset for this pixel.
+ *
+ * The four pixels of each 2x2 quad take a quarter of a step each, so between them they cover the step
+ * evenly, and the quad as a whole is turned by a hash so the pattern never lines up across the
+ * screen. MobCloudQuadAverage then folds the four back together.
+ */
+float MobCloudDither(float2 Pixel)
+{
+	const float2 Quad = floor(Pixel * 0.5f);
+	const float2 Cell = Pixel - Quad * 2.0f;
+	const float Bayer = Cell.y > 0.5f ? (Cell.x > 0.5f ? 0.25f : 0.75f) : (Cell.x > 0.5f ? 0.5f : 0.0f);
+	// A hash rather than a gradient noise: gradient noise is ordered along diagonals, and with the
+	// quads averaged that order is all that is left to see, as hatching across the cloud.
+	uint Hash = (uint)Quad.x * 1973u + (uint)Quad.y * 9277u + 89173u;
+	Hash = (Hash ^ (Hash >> 13u)) * 1274126177u;
+	Hash ^= Hash >> 16u;
+	return frac(Bayer + (float)(Hash & 0xffffu) / 65536.0f);
+}
+
+/**
+ * The average of the 2x2 quad this pixel shares, read through the derivatives the hardware already has.
+ *
+ * Four samples a pixel for the price of one, at the cost of the quad's resolution, which clouds do not
+ * have much of anyway. There is no temporal filter behind this renderer to average a dither out, and
+ * without this the offsets read as grain. Fine derivatives are a D3D guarantee only; elsewhere the
+ * pixel keeps its own value.
+ */
+float4 MobCloudQuadAverage(float4 Value, float2 Pixel)
+{
+#if COMPILER_HLSL
+	const float SignX = frac(Pixel.x * 0.5f) < 0.25f ? 1.0f : -1.0f;
+	const float SignY = frac(Pixel.y * 0.5f) < 0.25f ? 1.0f : -1.0f;
+	const float4 Across = Value + ddx_fine(Value) * SignX;
+	const float4 Down = Value + ddy_fine(Value) * SignY;
+	const float4 Diagonal = Across + ddy_fine(Across) * SignY;
+	return (Value + Across + Down + Diagonal) * 0.25f;
+#else
+	return Value;
+#endif
+}
+
+/**
+ * The cloud along the view ray, integrated.
+ *
+ * Returns inscattered colour premultiplied by coverage in rgb, and one minus transmittance in a.
+ * OutDepths is how far along the ray the cloud starts and where it has done most of its covering,
+ * which is what lets a composite put a ship inside a cloud rather than behind all of it. A zero
+ * SurfaceCamRel marches without stopping at the scene, which is what the render pass does.
+ */
+float4 MobCloudMarch(float3 PixelCamRel, float3 SurfaceCamRel, float3 CentreCamRel,
+	float3 AxisX, float3 AxisY, float3 AxisZ, float3 Extent,
+	float Dither, int Steps, FMobCloud Cloud,
+	Texture3D ShapeTex, SamplerState ShapeSampler,
+	Texture3D DetailTex, SamplerState DetailSampler,
+	Texture2D WeatherTex, SamplerState WeatherSampler,
+	out float2 OutDepths)
+{
+	OutDepths = 0.0f;
+	const float PixelReach = length(PixelCamRel);
+	if (PixelReach < 1e-3f)
+	{
+		return 0.0f;
+	}
+	const float3 Dir = PixelCamRel / PixelReach;
+
+	// From the projection rather than from derivatives, which a material's march cannot take.
+	const float PixelAngle = max(Cloud.PixelAngle, 1e-5f);
+
+	AxisX = normalize(AxisX);
+	AxisY = normalize(AxisY);
+	AxisZ = normalize(AxisZ);
+
+	float T0, T1;
+	float Reach;
+	if (Cloud.IsVolume > 0.5f)
+	{
+		if (!MobFogRayEllipsoid(Dir, CentreCamRel, AxisX, AxisY, AxisZ, Extent, T0, T1))
+		{
+			return 0.0f;
+		}
+		T0 = max(T0, 0.0f);
+		Reach = T1;
+	}
+	else
+	{
+		// The slab is widened downwards by the most the planet can bend it within reach, and the
+		// density function trims it back.
+		const float Above = max(Cloud.CamWorld.z - Cloud.Top, 0.0f);
+		Reach = Cloud.MaxDistance + Above * Cloud.ReachPerHeight;
+		const float Bend = Reach * Reach / (2.0f * max(Cloud.PlanetRadius, 1.0f));
+
+		if (!MobCloudRaySlab(Dir, Cloud.CamWorld.z, Cloud.Base - Bend, Cloud.Top, T0, T1))
+		{
+			return 0.0f;
+		}
+
+		// The reach is horizontal, so a steep ray gets to go further before it runs out.
+		T1 = min(T1, Reach / max(length(Dir.xy), 1e-3f));
+	}
+
+	const float SurfaceReach = length(SurfaceCamRel);
+	if (SurfaceReach > 1e-3f)
+	{
+		T1 = min(T1, SurfaceReach);
+	}
+	if (T1 <= T0)
+	{
+		return 0.0f;
+	}
+
+	// The angle between the ray and the key does not change along a straight ray, so the phase is
+	// exact evaluated once here.
+	const float CosTheta = dot(Dir, Cloud.KeyDir);
+	const float Phase = lerp(MobFogPhase(CosTheta, Cloud.PhaseForward),
+		MobFogPhase(CosTheta, Cloud.PhaseBack), Cloud.PhaseBlend);
+	const float3 Sun = Cloud.KeyColor * Phase;
+
+	// Thin edges only darken seen away from the sun; looking towards it they are the silver lining.
+	const float PowderView = saturate(CosTheta * 0.5f + 0.5f);
+
+	// The look towards the sun in the volume's own unit frame, so a volume's rim fade follows it.
+	const float3 LocalKey = float3(dot(Cloud.KeyDir, AxisX), dot(Cloud.KeyDir, AxisY),
+		dot(Cloud.KeyDir, AxisZ)) / max(Extent, 1e-3f);
+
+	const int StepCount = clamp(Steps, 4, 96);
+	const float Span = T1 - T0;
+
+	// Step length grows with distance, so a cloud beside you is resolved finely and one at the horizon,
+	// which covers a few pixels, is not paid for as though it were near. Empty air is crossed four times
+	// faster, and the march backs up and refines the moment it lands in cloud.
+	const float MinStep = Cloud.IsVolume > 0.5f ? Span / (float)StepCount : Cloud.ShapeScale / 64.0f;
+	const float Ratio = 1.0f / (float)StepCount;
+
+	// A layer seen from high above is crossed in a few kilometres however far away it is, so the step
+	// is also capped by the crossing itself.
+	const float MaxStep = max(Span / (float)StepCount, MinStep);
+	const int Budget = StepCount * 3;
+
+	float Transmittance = 1.0f;
+	float3 Inscatter = 0.0f;
+	float WeightedDistance = 0.0f;
+	float Weight = 0.0f;
+	float Front = -1.0f;
+	float Back = 0.0f;
+	float T = T0 + Dither * min(max(MinStep, T0 * Ratio), MaxStep) * 4.0f;
+	bool bDense = false;
+	int EmptyRun = 0;
+
+	LOOP
+	for (int Step = 0; Step < Budget && T < T1; ++Step)
+	{
+		const float Fine = min(max(MinStep, T * Ratio), MaxStep);
+		const float StepLength = bDense ? Fine : Fine * 4.0f;
+
+		const float3 P = Dir * T;
+		const float3 World = P + Cloud.CamWorld;
+		const float3 Offset = P - CentreCamRel;
+		const float3 Local = float3(dot(Offset, AxisX), dot(Offset, AxisY), dot(Offset, AxisZ))
+			/ max(Extent, 1e-3f);
+
+		const float Footprint = T * PixelAngle;
+		const bool bDetail = bDense && Cloud.UseDetail > 0.5f;
+
+		const float D = MobCloudDensityAt(World, Local, Footprint, Cloud, bDetail,
+			ShapeTex, ShapeSampler, DetailTex, DetailSampler, WeatherTex, WeatherSampler);
+
+		if (!bDense)
+		{
+			if (D > 0.0f)
+			{
+				bDense = true;
+				T = max(T - StepLength, T0);
+				continue;
+			}
+			T += StepLength;
+			continue;
+		}
+
+		// Reach fade, so a layer ends in the distance rather than at a circle.
+		const float Fade = Cloud.IsVolume > 0.5f ? 1.0f : saturate((Reach - T * length(Dir.xy)) / (0.3f * Reach));
+		const float Sigma = D * Fade * Cloud.Density;
+
+		if (Sigma > 0.0f)
+		{
+			EmptyRun = 0;
+
+			float Lit = 1.0f;
+			if (Cloud.UseShadow > 0.5f)
+			{
+				Lit = MobCloudShadow(World, Local, LocalKey, Cloud,
+					ShapeTex, ShapeSampler, DetailTex, DetailSampler, WeatherTex, WeatherSampler);
+			}
+
+			const float Powder = lerp(1.0f - Cloud.Powder * exp2(-D * 6.0f), 1.0f, PowderView);
+
+			const float H = Cloud.IsVolume > 0.5f ? saturate(Local.z * 0.5f + 0.5f)
+				: saturate(MobCloudHeightFraction(World, Cloud));
+			const float3 Ambient = Cloud.Ambient * lerp(Cloud.AmbientBottom, 1.0f, H * H);
+			const float3 Source = (Sun * Lit * Powder + Ambient) * Cloud.ScatterColor + Cloud.EmissiveColor;
+
+			const float StepTransmittance = exp2(-Sigma * StepLength);
+			const float Absorbed = Transmittance * (1.0f - StepTransmittance);
+			Inscatter += Absorbed * Source;
+			WeightedDistance += Absorbed * T;
+			Weight += Absorbed;
+			Transmittance *= StepTransmittance;
+
+			// At the first light it takes, not at some opacity: a thin sheet never reaches one, and a
+			// cloud with no front covers everything in the composite, ships included.
+			if (Front < 0.0f && Absorbed > 0.0f)
+			{
+				Front = T;
+			}
+			if (Absorbed > 0.002f)
+			{
+				Back = T + StepLength;
+			}
+
+			if (Transmittance < MOB_CLOUD_MIN_TRANSMITTANCE)
+			{
+				break;
+			}
+		}
+		else if (++EmptyRun > 4)
+		{
+			bDense = false;
+			EmptyRun = 0;
+		}
+
+		T += StepLength;
+	}
+
+	// What is left once the march gives up counts as gone, or the densest cloud stays faintly see-through.
+	const float Coverage = Transmittance < MOB_CLOUD_MIN_TRANSMITTANCE ? 1.0f : 1.0f - Transmittance;
+
+	// Distant cloud sits behind air too, and fades into the horizon's colour as it would.
+	const float Distance = Weight > 0.0f ? WeightedDistance / Weight : 0.0f;
+	const float Haze = 1.0f - exp2(-Distance * Cloud.Air / max(Cloud.HazeDistance, 1.0f));
+	Inscatter = lerp(Inscatter, Cloud.HazeColor * Coverage, Haze);
+
+	OutDepths = Front < 0.0f ? 0.0f : float2(Front, max(Back, Front + 1.0f));
+	return float4(Inscatter, Coverage);
+}

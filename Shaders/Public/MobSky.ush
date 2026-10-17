@@ -1,0 +1,181 @@
+// Copyright (c) Jared Taylor
+
+// The sky, as one material on a dome that follows the camera.
+//
+// Three things composited: an analytic atmosphere that thins with altitude, the planet below the
+// horizon once there is enough height to see it as one, and space behind both. Space is stars,
+// the galaxy the planet sits in, distant galaxies and nebulae (MobSkySpace.ush).
+//
+// Everything here is a function of direction alone, apart from how much air is above the camera,
+// which arrives from the subsystem. Nothing in it has parallax, because nothing in it is near.
+
+#pragma once
+
+#include "/MobSky/Public/MobSkySpace.ush"
+
+struct FMobSkyAtmosphere
+{
+	float3 Zenith;
+	float3 Horizon;
+	float3 Sunset;
+	float3 Night;
+	float3 Ground;
+
+	/** How sharply the horizon colour gives way to the zenith. */
+	float HorizonExponent;
+
+	/** Cosine of the sun disc's angular radius, how bright the disc is, how tight and bright the glow round it. */
+	float SunCos;
+	float SunIntensity;
+	float HaloExponent;
+	float HaloIntensity;
+
+	/** The thin bright band along the planet's rim seen from above the air. */
+	float LimbWidth;
+	float LimbIntensity;
+
+	/** How much air is above the camera, 1 at the ground and 0 in vacuum. */
+	float Air;
+
+	/** Height above the ground, and the planet's radius, for how far the horizon dips. */
+	float Altitude;
+	float PlanetRadius;
+
+	float3 KeyDir;
+	float3 KeyColor;
+};
+
+/** How far below level the horizon sits, as the sine of the angle. Zero on the ground. */
+float MobSkyHorizonDip(float Altitude, float PlanetRadius)
+{
+	const float R = max(PlanetRadius, 1.0f);
+	const float Ratio = R / (R + max(Altitude, 0.0f));
+	return -sqrt(saturate(1.0f - Ratio * Ratio));
+}
+
+/**
+ * The cloud deck seen from above, past where the volumetric layer reaches, painted onto the planet.
+ *
+ * From orbit the deck reaches the horizon, hundreds of kilometres further than any march can afford
+ * to go, and at that distance it is a pattern rather than a volume. It reads the same weather map the
+ * layer does, so the storms carry on past the layer's edge instead of stopping at a circle.
+ *
+ * Far is the layer's weather scale, coverage, planet weather scale and amount; FarB its wind, where
+ * the painted deck takes over from the march, and the deck's height. Returns premultiplied colour.
+ */
+float4 MobSkyFarClouds(float3 Dir, float3 CamWorld, FMobSkyAtmosphere Atmos, float4 Far, float4 FarB,
+	float Time, float PixelAngle, Texture2D WeatherTex, SamplerState WeatherSampler)
+{
+	const float Height = CamWorld.z - FarB.w;
+	if (Far.y <= 0.0f || Height <= 0.0f || Dir.z >= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// Where the ray meets the deck, as a sphere the planet's radius round the planet's centre.
+	const float R = max(Atmos.PlanetRadius, 1.0f);
+	const float Above = R + Height;
+	const float B = Above * Dir.z;
+	const float Disc = B * B - (Above * Above - R * R);
+	if (Disc <= 0.0f)
+	{
+		return 0.0f;
+	}
+	const float T = -B - sqrt(Disc);
+	const float Across = T * sqrt(saturate(1.0f - Dir.z * Dir.z));
+	const float2 XY = CamWorld.xy + normalize(Dir.xy + 1e-6f) * Across;
+	const float Footprint = T * PixelAngle;
+
+	const float2 UV = (XY + FarB.xy * Time * 0.5f) / max(Far.x, 1.0f);
+	const float Lod = clamp(log2(max(Footprint / max(Far.x, 1.0f) * 512.0f, 1.0f)), 0.0f, 8.0f);
+	const float2 Near = WeatherTex.SampleLevel(WeatherSampler, UV, Lod).rg;
+	const float2 FarUV = float2(UV.x * 0.8f - UV.y * 0.6f, UV.x * 0.6f + UV.y * 0.8f) * 0.21f;
+	const float Region = lerp(0.6f, 1.25f, WeatherTex.SampleLevel(WeatherSampler, FarUV, max(Lod - 2.0f, 0.0f)).b);
+
+	const float2 MacroUV = (XY + FarB.xy * Time * 0.2f) / max(Far.z, 1.0f);
+	const float MacroLod = clamp(log2(max(Footprint / max(Far.z, 1.0f) * 512.0f, 1.0f)), 0.0f, 8.0f);
+	const float Macro = WeatherTex.SampleLevel(WeatherSampler, MacroUV, MacroLod).a;
+	const float Coverage = saturate(Far.y + (Macro - 0.5f) * 2.0f * Far.w);
+	const float Threshold = 1.0f - Coverage;
+	const float Cover = lerp(smoothstep(Threshold - 0.15f, Threshold + 0.25f, Near.r * Region), Coverage,
+		saturate((Lod - 1.0f) / 3.0f));
+
+	// Takes over as the layer runs out, so there is no seam where one gives way to the other.
+	const float Handover = saturate((Across - FarB.z) / max(FarB.z * 0.3f, 1.0f));
+	const float Alpha = Cover * Handover * 0.95f;
+
+	const float Daylight = smoothstep(-0.12f, 0.12f, Atmos.KeyDir.z);
+	const float3 Lit = Atmos.KeyColor * lerp(0.55f, 1.0f, saturate(Atmos.KeyDir.z)) * Daylight
+		* lerp(0.8f, 1.0f, Near.g) + Atmos.Night;
+	return float4(Lit * Alpha, Alpha);
+}
+
+/**
+ * The air, lit, and how much of what is behind it still shows through.
+ *
+ * Returns the colour in rgb and the transmittance to space in a.
+ */
+float4 MobSkyAtmosphereColor(float3 Dir, FMobSkyAtmosphere Atmos, float4 FarCloud)
+{
+	const float SunUp = Atmos.KeyDir.z;
+	const float Daylight = smoothstep(-0.12f, 0.12f, SunUp);
+
+	// Elevation measured from the horizon actually seen, which drops as the camera climbs.
+	const float Dip = MobSkyHorizonDip(Atmos.Altitude, Atmos.PlanetRadius);
+	const float Elevation = (Dir.z - Dip) / max(1.0f - Dip, 1e-3f);
+	const float Horizon = pow(1.0f - saturate(Elevation), Atmos.HorizonExponent);
+
+	float3 Sky = lerp(Atmos.Zenith, Atmos.Horizon, Horizon);
+
+	// Sunset lives on the horizon towards the sun, and only while the sun is near it.
+	const float Low = 1.0f - saturate(abs(SunUp) * 4.0f);
+	const float2 Flat = normalize(Dir.xy + 1e-5f);
+	const float2 SunFlat = normalize(Atmos.KeyDir.xy + 1e-5f);
+	const float Towards = pow(saturate(dot(Flat, SunFlat) * 0.5f + 0.5f), 3.0f);
+	Sky = lerp(Sky, Atmos.Sunset, Low * Towards * Horizon);
+
+	const float3 Lit = lerp(Atmos.Night, Sky * Atmos.KeyColor, Daylight);
+
+	// The air thins towards space. What is left of it hugs the horizon, so the zenith goes black first.
+	const float AirHere = Atmos.Air * lerp(1.0f, 0.25f + 0.75f * Horizon, 1.0f - Atmos.Air);
+	float3 Color = Lit * AirHere;
+
+	const float CosSun = dot(Dir, Atmos.KeyDir);
+	const float Disc = smoothstep(Atmos.SunCos - 2e-5f, Atmos.SunCos + 2e-5f, CosSun);
+	const float Halo = pow(saturate(CosSun), Atmos.HaloExponent) * Atmos.HaloIntensity * (0.2f + 0.8f * Atmos.Air);
+	Color += Atmos.KeyColor * (Disc * Atmos.SunIntensity + Halo);
+
+	// Seen from above the air, the atmosphere is a thin band on the planet's rim.
+	const float Above = 1.0f - Atmos.Air;
+	const float Limb = exp(-abs(Dir.z - Dip) / max(Atmos.LimbWidth, 1e-4f)) * Above * Atmos.LimbIntensity;
+	Color += Atmos.Horizon * Atmos.KeyColor * Limb * lerp(0.05f, 1.0f, Daylight);
+
+	// Stars wash out in a lit sky, and not at all in vacuum.
+	const float Transmittance = exp(-12.0f * AirHere * Daylight);
+
+	if (Dir.z < Dip)
+	{
+		// The planet. Lit by the sun on the side facing it, and hazed near its rim the way the air
+		// would haze it.
+		const float Rim = pow(1.0f - saturate((Dip - Dir.z) * 6.0f), 4.0f);
+		const float3 Surface = Atmos.Ground * Atmos.KeyColor * Daylight * (1.0f - FarCloud.a) + FarCloud.rgb;
+		const float Haze = saturate(Rim * 0.6f + Atmos.Air * 0.85f);
+		Color = lerp(Surface, Atmos.Horizon * Atmos.KeyColor * Daylight, Haze)
+			+ Atmos.Night * (1.0f - Daylight);
+		return float4(Color, 0.0f);
+	}
+
+	return float4(Color, Transmittance);
+}
+
+/**
+ * The whole dome.
+ *
+ * Space arrives from the baked cube when the material has one, and is otherwise the live
+ * march; the stars are always live, because a point does not survive a cube's resolution.
+ */
+float3 MobSkyColor(float3 Dir, FMobSkyAtmosphere Atmos, float3 Space, float3 Stars, float4 FarCloud)
+{
+	const float4 Air = MobSkyAtmosphereColor(Dir, Atmos, FarCloud);
+	return Air.rgb + (Space + Stars) * Air.a;
+}

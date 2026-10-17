@@ -1,0 +1,224 @@
+// Copyright (c) Jared Taylor
+
+// The clouds as a render pass: marched at a fraction of the screen's resolution, accumulated over
+// frames, and handed to a composite material that sorts them into the translucency pass.
+//
+// The march takes no scene depth. It runs before the base pass, when there is none, and the
+// composite puts ships and ground in front of or inside the cloud from the front and back depths it
+// leaves behind.
+
+#include "/Engine/Private/Common.ush"
+#include "/MobSky/Public/MobCloud.ush"
+
+#define MOB_CLOUD_MAX_LAYERS 4
+
+// Depths are stored in tens of metres. Half floats run out at 65504, which in centimetres is 650 m.
+#define MOB_CLOUD_DEPTH_SCALE 0.001f
+
+// Layers arrive nearest the camera first, so the march can composite them front to back.
+int LayerCount;
+float4 LayerA[MOB_CLOUD_MAX_LAYERS];
+float4 LayerB[MOB_CLOUD_MAX_LAYERS];
+float4 LayerC[MOB_CLOUD_MAX_LAYERS];
+float4 LayerD[MOB_CLOUD_MAX_LAYERS];
+float4 LayerE[MOB_CLOUD_MAX_LAYERS];
+float4 LayerF[MOB_CLOUD_MAX_LAYERS];
+float4 LayerG[MOB_CLOUD_MAX_LAYERS];
+float4 LayerScatter[MOB_CLOUD_MAX_LAYERS];
+float4 LayerEmissive[MOB_CLOUD_MAX_LAYERS];
+float4 LayerFlags[MOB_CLOUD_MAX_LAYERS];
+
+// Clip space to a direction from the camera, with no translation in it.
+float4x4 ClipToRelative;
+float4x4 PrevRelativeToClip;
+float4 CamWorld;
+float4 CamDelta;
+float2 OutputSize;
+float FrameJitter;
+float Time;
+float4 KeyDir;
+float4 KeyColor;
+float4 Ambient;
+float4 Haze;
+float HistoryWeight;
+int bHistoryValid;
+
+// Which pixel of each block is marched this frame in xy, and the block's width in z: 2 marches a
+// quarter of the pixels a frame and rebuilds the rest from history, 1 marches all of them.
+float4 Checker;
+float2 MarchSize;
+
+// Where in its pixel this frame's ray passes, in -0.5..0.5. Moving it every frame is what lets the
+// history smooth a billow smaller than a pixel instead of catching it or missing it outright.
+float2 SubPixel;
+float PixelAngle;
+
+Texture3D ShapeTex;
+SamplerState ShapeTexSampler;
+Texture3D DetailTex;
+SamplerState DetailTexSampler;
+Texture2D WeatherTex;
+SamplerState WeatherTexSampler;
+
+Texture2D CurrentColor;
+Texture2D CurrentDepth;
+Texture2D HistoryColor;
+Texture2D HistoryDepth;
+SamplerState LinearSampler;
+
+float3 MobCloudPassDirection(float2 UV)
+{
+	const float4 Clip = float4(UV * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 1.0f, 1.0f);
+	const float4 Relative = mul(Clip, ClipToRelative);
+	return normalize(Relative.xyz / Relative.w);
+}
+
+FMobCloud MobCloudPassLayer(int Index)
+{
+	FMobCloud Cloud;
+	Cloud.Base = LayerA[Index].x;
+	Cloud.Top = LayerA[Index].y;
+	Cloud.Density = LayerA[Index].z;
+	Cloud.Coverage = LayerA[Index].w;
+	Cloud.CoverageScale = LayerB[Index].x;
+	Cloud.ShapeScale = LayerB[Index].y;
+	Cloud.DetailScale = LayerB[Index].z;
+	Cloud.DetailAmount = LayerB[Index].w;
+	Cloud.Wind = LayerC[Index].xy;
+	Cloud.BottomFade = LayerC[Index].z;
+	Cloud.TopFade = LayerC[Index].w;
+	Cloud.MaxDistance = LayerD[Index].x;
+	Cloud.ReachPerHeight = LayerD[Index].y;
+	Cloud.PlanetRadius = LayerD[Index].w;
+	Cloud.PhaseForward = LayerE[Index].x;
+	Cloud.PhaseBack = LayerE[Index].y;
+	Cloud.PhaseBlend = LayerE[Index].z;
+	Cloud.AmbientBottom = LayerE[Index].w;
+	Cloud.ShadowDistance = LayerF[Index].x;
+	Cloud.EdgeFade = LayerF[Index].y;
+	Cloud.HazeDistance = LayerF[Index].z;
+	Cloud.Powder = LayerF[Index].w;
+	Cloud.Time = Time;
+	Cloud.CamWorld = CamWorld.xyz;
+	Cloud.KeyDir = normalize(KeyDir.xyz + float3(0.0f, 0.0f, 1e-5f));
+	Cloud.KeyColor = KeyColor.rgb;
+	Cloud.Ambient = Ambient.rgb;
+	Cloud.HazeColor = Haze.rgb;
+	Cloud.Air = Haze.a;
+	Cloud.PixelAngle = PixelAngle;
+	Cloud.MacroScale = LayerG[Index].x;
+	Cloud.MacroAmount = LayerG[Index].y;
+	Cloud.ScatterColor = LayerScatter[Index].rgb;
+	Cloud.EmissiveColor = LayerEmissive[Index].rgb;
+	Cloud.UseDetail = LayerFlags[Index].x;
+	Cloud.UseShadow = LayerFlags[Index].y;
+	Cloud.IsVolume = 0.0f;
+	return Cloud;
+}
+
+void MarchPS(float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0, out float4 OutDepth : SV_Target1)
+{
+	// The march target holds one pixel per block; this is the output pixel it stands for this frame.
+	const float2 Pixel = floor(SvPosition.xy) * Checker.z + Checker.xy;
+	const float3 Dir = MobCloudPassDirection((Pixel + 0.5f + SubPixel) / OutputSize);
+
+	// A new offset every frame, so the accumulation sees the whole step rather than the same slice of it.
+	const float Dither = frac(MobCloudDither(Pixel) + FrameJitter);
+
+	float3 Inscatter = 0.0f;
+	float Transmittance = 1.0f;
+	float Front = 0.0f;
+	float Back = 0.0f;
+
+	for (int Index = 0; Index < LayerCount; ++Index)
+	{
+		const FMobCloud Cloud = MobCloudPassLayer(Index);
+
+		float2 Depths;
+		const float4 Layer = MobCloudMarch(Dir, 0.0f, 0.0f,
+			float3(1.0f, 0.0f, 0.0f), float3(0.0f, 1.0f, 0.0f), float3(0.0f, 0.0f, 1.0f), 1.0f,
+			Dither, (int)(LayerD[Index].z + 0.5f), Cloud,
+			ShapeTex, ShapeTexSampler, DetailTex, DetailTexSampler, WeatherTex, WeatherTexSampler,
+			Depths);
+
+		if (Layer.a > 0.0f)
+		{
+			Inscatter += Transmittance * Layer.rgb;
+			Front = Front > 0.0f ? Front : Depths.x;
+			Back = max(Back, Depths.y);
+			Transmittance *= 1.0f - Layer.a;
+		}
+	}
+
+	OutColor = float4(Inscatter, 1.0f - Transmittance);
+	OutDepth = float4(Front, Back, 0.0f, 0.0f) * MOB_CLOUD_DEPTH_SCALE;
+}
+
+void TemporalPS(float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0, out float4 OutDepth : SV_Target1)
+{
+	const int2 Pixel = int2(SvPosition.xy);
+	const int Stride = (int)(Checker.z + 0.5f);
+	const int2 Block = Pixel / Stride;
+	const int2 LastBlock = int2(MarchSize) - 1;
+	const bool bFresh = all(Pixel - Block * Stride == int2(Checker.xy));
+
+	const float4 Colour = CurrentColor.Load(int3(min(Block, LastBlock), 0));
+	const float4 Depth = CurrentDepth.Load(int3(min(Block, LastBlock), 0));
+
+	// The history may only stray as far as this frame's samples round the pixel do, which is what
+	// stops a cloud that has moved away from leaving a trail, and a pixel not marched this frame from
+	// holding on to one that is gone.
+	float4 Low = Colour;
+	float4 High = Colour;
+	UNROLL
+	for (int Y = -1; Y <= 1; ++Y)
+	{
+		UNROLL
+		for (int X = -1; X <= 1; ++X)
+		{
+			const float4 Near = CurrentColor.Load(int3(clamp(Block + int2(X, Y), int2(0, 0), LastBlock), 0));
+			Low = min(Low, Near);
+			High = max(High, Near);
+		}
+	}
+
+	// Where the cloud was last frame, found by putting this pixel's cloud back into the world.
+	const float2 UV = SvPosition.xy / OutputSize;
+	const float3 Dir = MobCloudPassDirection(UV);
+	// Clear sky goes back as a direction, which is a point at infinity; a stand-in distance large enough
+	// to pass for one breaks the projection.
+	const float Distance = 0.5f * (Depth.x + Depth.y) / MOB_CLOUD_DEPTH_SCALE;
+	const float4 Previous = Colour.a > 0.01f ? float4(Dir * Distance + CamDelta.xyz, 1.0f) : float4(Dir, 0.0f);
+	const float4 PrevClip = mul(Previous, PrevRelativeToClip);
+	const float2 PrevUV = PrevClip.xy / PrevClip.w * float2(0.5f, -0.5f) + 0.5f;
+
+	const bool bValid = bHistoryValid != 0 && PrevClip.w > 0.0f && all(PrevUV > 0.0f) && all(PrevUV < 1.0f);
+	if (!bValid)
+	{
+		// Nothing to rebuild from: the pixels not marched this frame take this frame's samples, spread, and
+		// their depth spread the same way. A spread colour with its own block's depth puts the edge of a
+		// neighbouring cloud on the pixel with no distance, which the composite draws over the cockpit.
+		OutColor = bFresh ? Colour : CurrentColor.SampleLevel(LinearSampler, UV, 0.0f);
+		OutDepth = bFresh ? Depth : CurrentDepth.SampleLevel(LinearSampler, UV, 0.0f);
+		return;
+	}
+
+	const float4 Unclamped = HistoryColor.SampleLevel(LinearSampler, PrevUV, 0.0f);
+	const float4 History = clamp(Unclamped, Low, High);
+	const float4 HistoryDepths = HistoryDepth.SampleLevel(LinearSampler, PrevUV, 0.0f);
+
+	// A pixel not marched this frame only has its neighbours' samples to be clamped against, and
+	// against a billow smaller than the gap between them that clamp throws the history away. While
+	// the image holds still it keeps its history whole; the clamp comes in as the picture moves.
+	const float Moved = saturate(length((PrevUV - UV) * OutputSize) * 0.5f);
+	OutColor = bFresh ? lerp(Colour, History, HistoryWeight) : lerp(Unclamped, History, Moved);
+
+	// Depth goes with whichever colour the pixel kept. A blend with an empty sample's zero would drag the
+	// cloud towards the camera, and a cloud carried from history with this frame's empty depth reads as
+	// cloud of unknown distance, which the composite draws over everything, the cockpit included.
+	const bool bCurrentDepth = Colour.a > 0.01f && Depth.y > 0.0f;
+	const bool bHistoryDepth = HistoryDepths.y > 0.0f;
+	const float4 Blended = bFresh ? lerp(Depth, HistoryDepths, HistoryWeight) : HistoryDepths;
+	const float4 Kept = bCurrentDepth && bHistoryDepth ? Blended : (bHistoryDepth ? HistoryDepths : Depth);
+	OutDepth = OutColor.a > 0.01f ? Kept : Depth;
+}

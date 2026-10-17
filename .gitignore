@@ -1,0 +1,25 @@
+DerivedDataCache
+Saved
+Script
+Intermediate
+Binaries
+.idea
+.vs
+*.sln
+__pycache__
+*.pyc
+
+# Authored by Water > Generate Materials. Python/author_water.py and Shaders/ are the source; these
+# are its output, and every regenerate rewrites all of them.
+#
+# The generators also write Content/Functions and Content/Textures, and those stay tracked: the water
+# settings name the render targets, the ripple field and the foam by soft path, so a clone without
+# them has dangling references, where a clone without a material only has water that has not been
+# generated yet. The proxy meshes are neither, being the one thing here nothing generates.
+Content/Materials/
+
+# A baked sea state is author-time output of Python/mob_water_spectrum.py, and one loop is six
+# megabytes of uncompressed atlas and query table for six seconds of arithmetic. The bake is seeded,
+# so two machines produce the same bytes. A project bakes the states it wants; the repo carries the
+# recipe, not the result.
+Content/Spectra/

@@ -1,0 +1,342 @@
+// Copyright (c) Jared Taylor
+
+// Space, as seen from inside a galaxy.
+//
+// Stars are hashed into cells on the faces of a cube, one candidate per cell, so the whole field costs
+// one cell's worth of work a pixel whatever its density. The galaxy is marched as a real disc of
+// stars and dust with the camera inside it, which is what gives the band its dark lanes. Distant
+// galaxies are the same idea shrunk to a sprite, and nebulae are small volumes marched through the
+// cloud noise.
+
+#pragma once
+
+// ---------------------------------------------------------------------------------------------------
+// Hashing
+// ---------------------------------------------------------------------------------------------------
+
+uint MobSkyHashU(uint X)
+{
+	// PCG. Integer, so two cells a float's rounding apart never share a star.
+	X = X * 747796405u + 2891336453u;
+	const uint Word = ((X >> ((X >> 28u) + 4u)) ^ X) * 277803737u;
+	return (Word >> 22u) ^ Word;
+}
+
+float4 MobSkyHash4(uint3 Cell)
+{
+	uint H = MobSkyHashU(Cell.x + MobSkyHashU(Cell.y + MobSkyHashU(Cell.z)));
+	float4 Out;
+	Out.x = (float)(H & 0xffffu) / 65535.0f;
+	H = MobSkyHashU(H);
+	Out.y = (float)(H & 0xffffu) / 65535.0f;
+	H = MobSkyHashU(H);
+	Out.z = (float)(H & 0xffffu) / 65535.0f;
+	H = MobSkyHashU(H);
+	Out.w = (float)(H & 0xffffu) / 65535.0f;
+	return Out;
+}
+
+/** Which cube face a direction is on, and where on it, in -1..1. */
+void MobSkyCubeFace(float3 Dir, out uint Face, out float2 UV)
+{
+	const float3 A = abs(Dir);
+	if (A.x >= A.y && A.x >= A.z)
+	{
+		Face = Dir.x > 0.0f ? 0u : 1u;
+		UV = Dir.yz / A.x;
+	}
+	else if (A.y >= A.z)
+	{
+		Face = Dir.y > 0.0f ? 2u : 3u;
+		UV = Dir.xz / A.y;
+	}
+	else
+	{
+		Face = Dir.z > 0.0f ? 4u : 5u;
+		UV = Dir.xy / A.z;
+	}
+}
+
+float3 MobSkyFromCubeFace(uint Face, float2 UV)
+{
+	const float S = (Face & 1u) ? -1.0f : 1.0f;
+	float3 Dir;
+	if (Face < 2u)
+	{
+		Dir = float3(S, UV.x, UV.y);
+	}
+	else if (Face < 4u)
+	{
+		Dir = float3(UV.x, S, UV.y);
+	}
+	else
+	{
+		Dir = float3(UV.x, UV.y, S);
+	}
+	return normalize(Dir);
+}
+
+/** Roughly what colour a star of a given temperature is, from 0 (red dwarf) to 1 (blue giant). */
+float3 MobSkyStarTint(float T)
+{
+	const float3 Cool = float3(1.0f, 0.55f, 0.3f);
+	const float3 Sun = float3(1.0f, 0.93f, 0.85f);
+	const float3 Hot = float3(0.65f, 0.78f, 1.0f);
+	return T < 0.5f ? lerp(Cool, Sun, T * 2.0f) : lerp(Sun, Hot, T * 2.0f - 1.0f);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Stars
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * One layer of stars.
+ *
+ * Cells is how many cells cross a cube face, Chance how many of them hold a star, and Magnitude how
+ * steeply brightness falls away: high is a sky of mostly faint stars and a few bright ones, which is
+ * what a real one is. PixelAngle is how much sky one pixel covers, so a star is never smaller than a
+ * pixel and never aliases.
+ */
+float3 MobSkyStarLayer(float3 Dir, float Cells, float Chance, float Magnitude, float PixelAngle,
+	float Twinkle, float Time, uint Seed)
+{
+	uint Face;
+	float2 UV;
+	MobSkyCubeFace(Dir, Face, UV);
+
+	const float2 Grid = (UV * 0.5f + 0.5f) * Cells;
+	const float2 Cell = floor(Grid);
+	const float4 H = MobSkyHash4(uint3((uint)Cell.x + Seed * 4099u, (uint)Cell.y, Face + Seed * 13u));
+	if (H.x > Chance)
+	{
+		return 0.0f;
+	}
+
+	// Kept off the cell's edges, so the one cell a pixel looks in is the only one its star can reach.
+	const float2 At = (Cell + 0.2f + 0.6f * H.yz) / Cells * 2.0f - 1.0f;
+	const float3 StarDir = MobSkyFromCubeFace(Face, At);
+
+	const float Sigma = max(PixelAngle * 0.45f, 1e-5f);
+	const float Distance = length(Dir - StarDir);
+	const float Spot = exp(-Distance * Distance / (2.0f * Sigma * Sigma));
+
+	const float Brightness = pow(H.w, Magnitude);
+	const float Flicker = 1.0f + Twinkle * sin(Time * (6.0f + 9.0f * H.y) + H.z * 40.0f);
+
+	return MobSkyStarTint(frac(H.w * 7.13f + H.y)) * Brightness * Spot * Flicker;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Galaxy
+// ---------------------------------------------------------------------------------------------------
+
+struct FMobSkyGalaxy
+{
+	/** The disc's frame: two axes in its plane and its normal. */
+	float3 AxisA;
+	float3 AxisB;
+	float3 Normal;
+
+	float Brightness;
+	float Dust;
+	float ArmCount;
+	float ArmTightness;
+	float Bulge;
+	int Steps;
+
+	float3 DiscColor;
+	float3 BulgeColor;
+};
+
+/** Where the camera sits in the galaxy, in galaxy radii, and how thick its disc is. */
+#define MOB_SKY_OBSERVER_RADIUS 0.55f
+#define MOB_SKY_DISC_HEIGHT 0.035f
+#define MOB_SKY_DUST_HEIGHT 0.012f
+
+float MobSkyArms(float2 P, float Count, float Tightness)
+{
+	const float R = max(length(P), 1e-3f);
+	const float Theta = atan2(P.y, P.x);
+	const float Wave = cos(Count * (Theta - log(R) / max(Tightness, 0.05f)));
+	return 0.3f + 0.7f * pow(saturate(Wave * 0.5f + 0.5f), 2.0f);
+}
+
+/**
+ * The galaxy the camera is in, marched as a disc of stars and dust.
+ *
+ * Returns the light in rgb. Dust absorbs what is behind it along the ray, which is where the lanes
+ * down the middle of the band come from, and the noise breaks both into clumps.
+ */
+float3 MobSkyGalaxy(float3 Dir, FMobSkyGalaxy Galaxy, float Jitter,
+	Texture3D NoiseTex, SamplerState NoiseSampler)
+{
+	const float3 D = float3(dot(Dir, Galaxy.AxisA), dot(Dir, Galaxy.AxisB), dot(Dir, Galaxy.Normal));
+	const float3 Origin = float3(MOB_SKY_OBSERVER_RADIUS, 0.0f, 0.0f);
+
+	// Far enough to cross the whole disc from where the camera is, and no further.
+	const float Length = 2.2f;
+	const int Steps = clamp(Galaxy.Steps, 4, 48);
+	const float Step = Length / (float)Steps;
+
+	float Transmittance = 1.0f;
+	float3 Light = 0.0f;
+
+	LOOP
+	for (int I = 0; I < Steps; ++I)
+	{
+		// Squared, because the stars nearest the camera are what make the band read as a band.
+		const float U = ((float)I + Jitter) / (float)Steps;
+		const float T = Length * U * U;
+		const float Dt = Step * 2.0f * max(U, 0.05f);
+		const float3 P = Origin + D * T;
+
+		const float R = length(P.xy);
+		if (R > 1.4f)
+		{
+			break;
+		}
+
+		const float4 N = NoiseTex.SampleLevel(NoiseSampler, P * 6.0f, 0.0f);
+		const float Arms = MobSkyArms(P.xy, Galaxy.ArmCount, Galaxy.ArmTightness);
+
+		// Squared noise gathers the stars into clouds with gaps between, rather than an even haze.
+		const float Disc = exp(-abs(P.z) / MOB_SKY_DISC_HEIGHT) * exp(-R / 0.3f) * Arms * (0.2f + 1.6f * N.r * N.r);
+		const float Core = exp(-length(P * float3(1.0f, 1.0f, 1.8f)) / 0.07f) * Galaxy.Bulge;
+
+		// Dust sits in a thinner layer and hugs the inside edge of each arm.
+		const float Lane = MobSkyArms(P.xy * 1.08f, Galaxy.ArmCount, Galaxy.ArmTightness);
+		const float DustHere = exp(-abs(P.z) / MOB_SKY_DUST_HEIGHT) * exp(-R / 0.45f) * Lane
+			* saturate(N.g * 2.0f - 0.6f) * Galaxy.Dust * 150.0f;
+
+		// The nearest stars are the point stars, not glow, so the disc lights nothing close to the camera.
+		// Without it every direction starts inside the disc and the whole sky greys over.
+		const float3 Glow = Galaxy.DiscColor * Disc * saturate(T / 0.15f) + Galaxy.BulgeColor * Core;
+		Light += Transmittance * Glow * Dt;
+		Transmittance *= exp(-DustHere * Dt);
+	}
+
+	return Light * Galaxy.Brightness;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Distant galaxies
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * Other galaxies, far enough away to be sprites.
+ *
+ * One candidate per cube cell, like the stars, each with its own tilt, spin and size. Size is the
+ * angular radius in radians of the largest.
+ */
+float3 MobSkyDistantGalaxies(float3 Dir, float Cells, float Chance, float Brightness, float Size)
+{
+	uint Face;
+	float2 UV;
+	MobSkyCubeFace(Dir, Face, UV);
+
+	const float2 Cell = floor((UV * 0.5f + 0.5f) * Cells);
+	const float4 H = MobSkyHash4(uint3((uint)Cell.x + 7919u, (uint)Cell.y + 104729u, Face + 31u));
+	if (H.x > Chance)
+	{
+		return 0.0f;
+	}
+
+	const float2 At = (Cell + 0.3f + 0.4f * H.yz) / Cells * 2.0f - 1.0f;
+	const float3 Centre = MobSkyFromCubeFace(Face, At);
+
+	const float3 Up = abs(Centre.z) < 0.9f ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
+	const float3 Right = normalize(cross(Up, Centre));
+	const float3 Down = cross(Centre, Right);
+
+	const float Radius = Size * lerp(0.25f, 1.0f, H.w * H.w);
+	float2 P = float2(dot(Dir - Centre, Right), dot(Dir - Centre, Down)) / Radius;
+
+	// Spun and then squashed, which is a disc seen at an angle.
+	const float Spin = H.y * 6.2831853f;
+	P = float2(P.x * cos(Spin) - P.y * sin(Spin), P.x * sin(Spin) + P.y * cos(Spin));
+	P.y /= lerp(0.2f, 1.0f, H.z);
+
+	const float R = length(P);
+	if (R > 1.0f || dot(Dir, Centre) < 0.0f)
+	{
+		return 0.0f;
+	}
+
+	const float Arms = MobSkyArms(P * 4.0f, 2.0f, 0.35f);
+	const float Disc = exp(-R * 5.0f) * Arms;
+	const float Core = exp(-R * 30.0f);
+	return (float3(0.7f, 0.8f, 1.0f) * Disc + float3(1.0f, 0.85f, 0.6f) * Core) * Brightness;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Nebulae
+// ---------------------------------------------------------------------------------------------------
+
+struct FMobSkyNebula
+{
+	/** Where it is, as a direction, and its angular radius in radians in w. */
+	float4 Placement;
+
+	float3 ColorA;
+	float3 ColorB;
+
+	/** Brightness, dust, noise scale and a seed. */
+	float4 Params;
+};
+
+/**
+ * One nebula, marched through its own sphere of noise.
+ *
+ * Returns emitted light in rgb and the transmittance of its dust in a. Most of the sky is outside
+ * every nebula and leaves after one dot product.
+ */
+float4 MobSkyNebula(float3 Dir, FMobSkyNebula Nebula, float Jitter,
+	Texture3D NoiseTex, SamplerState NoiseSampler)
+{
+	const float3 Centre = normalize(Nebula.Placement.xyz);
+	const float Brightness = Nebula.Params.x;
+	if (Brightness <= 0.0f || dot(Dir, Centre) <= 0.0f)
+	{
+		return float4(0.0f, 0.0f, 0.0f, 1.0f);
+	}
+
+	const float3 Up = abs(Centre.z) < 0.9f ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
+	const float3 Right = normalize(cross(Up, Centre));
+	const float3 Down = cross(Centre, Right);
+
+	const float2 P = float2(dot(Dir, Right), dot(Dir, Down)) / max(sin(Nebula.Placement.w), 1e-3f);
+	const float Across = dot(P, P);
+	if (Across >= 1.0f)
+	{
+		return float4(0.0f, 0.0f, 0.0f, 1.0f);
+	}
+
+	const float Depth = sqrt(1.0f - Across);
+	const int Steps = 12;
+	const float Dt = 2.0f * Depth / (float)Steps;
+	const float3 Offset = float3(Nebula.Params.w * 0.37f, Nebula.Params.w * 0.71f, Nebula.Params.w * 0.13f);
+
+	float Transmittance = 1.0f;
+	float3 Light = 0.0f;
+
+	LOOP
+	for (int I = 0; I < Steps; ++I)
+	{
+		const float Z = -Depth + ((float)I + Jitter) * Dt;
+		const float3 Q = float3(P, Z);
+
+		// Folded through the noise twice, which turns blobs into filaments.
+		const float4 N = NoiseTex.SampleLevel(NoiseSampler, Q * Nebula.Params.z + Offset, 0.0f);
+		const float4 W = NoiseTex.SampleLevel(NoiseSampler, Q * Nebula.Params.z * 2.3f + N.gba * 0.35f, 0.0f);
+
+		// The rim is pushed in and out by the noise, so the nebula is not a ball.
+		const float Falloff = saturate(1.0f - dot(Q, Q) - (N.b - 0.5f) * 0.9f);
+		const float Gas = pow(saturate(W.r * 1.4f - 0.35f), 2.0f) * Falloff;
+		const float Dust = saturate(N.a * 1.8f - 0.8f) * Falloff * Nebula.Params.y;
+
+		Light += Transmittance * lerp(Nebula.ColorA, Nebula.ColorB, saturate(N.g * 1.5f - 0.25f)) * Gas * Dt;
+		Transmittance *= exp(-Dust * Dt * 6.0f);
+	}
+
+	return float4(Light * Brightness, Transmittance);
+}
