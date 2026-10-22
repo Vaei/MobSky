@@ -1,4 +1,4 @@
-// Copyright (c) Jared Taylor
+﻿// Copyright (c) Jared Taylor
 
 #pragma once
 
@@ -67,6 +67,12 @@ namespace MobSkyParams
 	MOBSKY_API extern const FName GalaxyBulgeColor;
 	MOBSKY_API extern const FName DistantA;
 	MOBSKY_API extern const FName SpaceCube;
+
+	/** M_MobSkyPanorama: the captured dome, the cubemap reflected in its place, its brightness, and how far it takes over. */
+	MOBSKY_API extern const FName PanoramaSky;
+	MOBSKY_API extern const FName PanoramaCubemap;
+	MOBSKY_API extern const FName PanoramaIntensity;
+	MOBSKY_API extern const FName PanoramaBlend;
 
 	/** A nebula slot's parameter: Nebula0Placement, Nebula1ColorA and so on. */
 	MOBSKY_API FName Nebula(int32 Index, const TCHAR* Field);

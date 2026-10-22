@@ -1,4 +1,4 @@
-// Copyright (c) Jared Taylor
+﻿// Copyright (c) Jared Taylor
 
 #include "MobSkySubsystem.h"
 
@@ -343,6 +343,18 @@ void UMobSkySubsystem::TickVisibility()
 	}
 }
 
+FVector UMobSkySubsystem::GetKeyDirection() const
+{
+	UMaterialParameterCollection* Collection = GetDefault<UMobFogSettings>()->ParameterCollection.LoadSynchronous();
+	UWorld* World = GetWorld();
+	if (!Collection || !World)
+	{
+		return FVector::UpVector;
+	}
+	const FLinearColor Key = UKismetMaterialLibrary::GetVectorParameterValue(World, Collection, KeyDirectionName);
+	return FVector(Key.R, Key.G, Key.B);
+}
+
 void UMobSkySubsystem::PublishAmbient(const UMobSkyComponent& Sky, float ViewZ) const
 {
 	UMaterialParameterCollection* Collection = GetDefault<UMobFogSettings>()->ParameterCollection.LoadSynchronous();
@@ -446,6 +458,7 @@ void UMobSkySubsystem::Tick(float DeltaTime)
 		{
 			Sky->FollowView(View);
 			Sky->TickBake(DeltaTime);
+			Sky->TickEnvironment(DeltaTime, View, GetKeyDirection());
 		}
 		else
 		{

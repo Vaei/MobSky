@@ -1,4 +1,4 @@
-// Copyright (c) Jared Taylor
+﻿// Copyright (c) Jared Taylor
 
 #pragma once
 
@@ -35,6 +35,17 @@ public:
 	/** Space alone, which is what the bake captures. */
 	UPROPERTY(EditAnywhere, Config, Category="Sky")
 	TSoftObjectPtr<UMaterialInterface> SpaceMaterial;
+
+	/** Turns the cube the sky is captured into into the long/lat panorama MobMaterials reflects. */
+	UPROPERTY(EditAnywhere, Config, Category="Sky")
+	TSoftObjectPtr<UMaterialInterface> PanoramaMaterial;
+
+	/**
+	 * Where the sky's panorama is drawn. An asset, so a surface material can name it as its Sky Panorama and
+	 * reflect the live sky with no code.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category="Sky")
+	TSoftObjectPtr<class UTextureRenderTarget2D> PanoramaTarget;
 
 	/** What the sky tells the clouds: the horizon's colour and how much air there is. */
 	UPROPERTY(EditAnywhere, Config, Category="Sky")

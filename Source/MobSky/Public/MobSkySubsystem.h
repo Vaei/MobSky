@@ -1,4 +1,4 @@
-// Copyright (c) Jared Taylor
+﻿// Copyright (c) Jared Taylor
 
 #pragma once
 
@@ -53,6 +53,8 @@ public:
 
 protected:
 	bool GetViewLocation(FVector& OutLocation) const;
+	/** Towards the key light, as the fog subsystem published it. */
+	FVector GetKeyDirection() const;
 	void TickVisibility();
 	void PublishAmbient(const UMobSkyComponent& Sky, float ViewZ) const;
 

@@ -1,4 +1,4 @@
-// Copyright (c) Jared Taylor
+﻿// Copyright (c) Jared Taylor
 
 #pragma once
 
@@ -8,6 +8,8 @@
 
 class UMaterialInstanceDynamic;
 class USceneCaptureComponentCube;
+class USkyLightComponent;
+class UTextureCube;
 class UTextureRenderTargetCube;
 
 /** A nebula on the backdrop. Far enough away to have no parallax; fly-through nebulae are cloud volumes. */
@@ -221,6 +223,42 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Cost", meta=(EditCondition="bBakeSpace", ClampMin="64", ClampMax="4096"))
 	int32 BakeResolution = 1024;
 
+	/**
+	 * Lights the world from this sky with a movable sky light of its own: the ambient that fills what the sun
+	 * does not reach, blue under air and next to nothing in space. It is recaptured as the air above the view
+	 * or the sun changes, not every frame. Skipped when the world already has a sky light.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Sky Light")
+	bool bDrivesSkyLight = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Sky Light", meta=(EditCondition="bDrivesSkyLight", ClampMin="0"))
+	float SkyLightIntensity = 1.f;
+
+	/**
+	 * Draws the sky into the panorama target in MobSky's settings, which is what a MobMaterials surface with
+	 * Sky Reflection reads. Recaptured with the sky light.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Sky Light")
+	bool bDrivesPanorama = true;
+
+	/**
+	 * A cubemap reflected in place of the dome while there is air above the view, for the detail a reflection
+	 * shows that the dome does not draw, such as clouds. Above the horizon only, and it gives way to the dome as the air runs out.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Sky Light", meta=(EditCondition="bDrivesPanorama"))
+	TSoftObjectPtr<UTextureCube> PanoramaCubemap;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Sky Light", meta=(EditCondition="bDrivesPanorama", ClampMin="0"))
+	float PanoramaCubemapIntensity = 1.f;
+
+	/** Recaptures once the air above the view has changed by this much since the last capture. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Sky Light", AdvancedDisplay, meta=(ClampMin="0.001", ClampMax="0.5"))
+	float RecaptureAirStep = 0.02f;
+
+	/** Resolution of each face of the cube the panorama is drawn from. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Sky Light", AdvancedDisplay, meta=(ClampMin="16", ClampMax="1024"))
+	int32 PanoramaCaptureResolution = 128;
+
 	/** Radius of the dome. Larger than anything you can see, and no more. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Cost", AdvancedDisplay, meta=(ClampMin="100000"))
 	float DomeRadius = 50000000.f;
@@ -241,6 +279,13 @@ public:
 
 	/** Takes a pending bake's captures. The subsystem calls this every frame. */
 	void TickBake(float DeltaTime);
+
+	/** Recaptures the sky light and the panorama when the sky has changed enough. The subsystem calls this every frame. */
+	void TickEnvironment(float DeltaTime, const FVector& ViewLocation, const FVector& KeyDirection);
+
+	/** Recaptures the sky light and the panorama on the next tick, however little the sky has changed. */
+	UFUNCTION(BlueprintCallable, Category="Sky")
+	void RecaptureEnvironment();
 
 	virtual void OnRegister() override;
 	virtual void OnUnregister() override;
@@ -269,6 +314,30 @@ protected:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTextureRenderTargetCube> SpaceTarget;
+
+	/** Creates the sky light and the panorama capture, in a game world that has none of its own. */
+	void SetupEnvironment();
+	void CaptureEnvironment(const FVector& ViewLocation);
+
+	UPROPERTY(Transient)
+	TObjectPtr<USkyLightComponent> SkyLight;
+
+	UPROPERTY(Transient)
+	TObjectPtr<USceneCaptureComponentCube> PanoramaCapture;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextureRenderTargetCube> PanoramaCube;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> PanoramaInstance;
+
+	/** The air and the sun as of the last capture; air below zero forces the next. */
+	float CapturedAir = -1.f;
+	FVector CapturedKey = FVector::ZeroVector;
+	/** Captures taken while shaders may still be compiling, and the time until the next. */
+	int32 EnvironmentRetakes = 0;
+	float EnvironmentClock = 0.f;
+	bool bEnvironmentWasCompiling = false;
 
 	FLinearColor LastState = FLinearColor(-1.f, -1.f, -1.f, -1.f);
 

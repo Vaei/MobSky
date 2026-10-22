@@ -1,4 +1,4 @@
-// Copyright (c) Jared Taylor
+﻿// Copyright (c) Jared Taylor
 
 #include "MobSkyComponent.h"
 
@@ -6,12 +6,17 @@
 #include "MobSkySettings.h"
 #include "MobSkySubsystem.h"
 #include "Components/SceneCaptureComponentCube.h"
+#include "Components/SkyLightComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/TextureCube.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "Engine/TextureRenderTargetCube.h"
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
+#include "Kismet/KismetRenderingLibrary.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "UObject/UObjectIterator.h"
 
 namespace
 {
@@ -98,6 +103,7 @@ void UMobSkyComponent::BeginPlay()
 	{
 		BakeSpace();
 	}
+	SetupEnvironment();
 }
 
 void UMobSkyComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -111,6 +117,16 @@ void UMobSkyComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		SpaceDome->DestroyComponent();
 		SpaceDome = nullptr;
+	}
+	if (SkyLight)
+	{
+		SkyLight->DestroyComponent();
+		SkyLight = nullptr;
+	}
+	if (PanoramaCapture)
+	{
+		PanoramaCapture->DestroyComponent();
+		PanoramaCapture = nullptr;
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -193,6 +209,7 @@ void UMobSkyComponent::BakeSpace()
 		SpaceDome->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		SpaceDome->CastShadow = false;
 		SpaceDome->bVisibleInSceneCaptureOnly = true;
+		SpaceDome->bVisibleInReflectionCaptures = false;
 		SpaceDome->bNeverDistanceCull = true;
 		SpaceDome->SetUsingAbsoluteLocation(true);
 		SpaceDome->SetUsingAbsoluteRotation(true);
@@ -334,4 +351,144 @@ void UMobSkyComponent::FollowView(const FVector& ViewLocation)
 		LastState = State;
 		Instance->SetVectorParameterValue(MobSkyParams::SkyState, State);
 	}
+}
+
+void UMobSkyComponent::SetupEnvironment()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(MobSkyComponent::SetupEnvironment);
+
+	UWorld* World = GetWorld();
+	AActor* Owner = GetOwner();
+	if (!World || !World->IsGameWorld() || !Owner)
+	{
+		return;
+	}
+
+	if (bDrivesSkyLight && !SkyLight)
+	{
+		bool bWorldHasSkyLight = false;
+		for (TObjectIterator<USkyLightComponent> It; It; ++It)
+		{
+			if (It->GetWorld() == World && It->IsRegistered())
+			{
+				bWorldHasSkyLight = true;
+				break;
+			}
+		}
+		if (!bWorldHasSkyLight)
+		{
+			SkyLight = NewObject<USkyLightComponent>(Owner, TEXT("MobSkyLight"), RF_Transient);
+			SkyLight->SetMobility(EComponentMobility::Movable);
+			SkyLight->SourceType = SLS_CapturedScene;
+			SkyLight->bCaptureEmissiveOnly = true;
+			SkyLight->bLowerHemisphereIsBlack = false;
+			// Everything nearer than this is left out of the capture, which leaves the dome alone in it: no
+			// ship, cockpit or world geometry becomes part of the sky.
+			SkyLight->SkyDistanceThreshold = DomeRadius * 0.9f;
+			SkyLight->Intensity = SkyLightIntensity;
+			SkyLight->SetUsingAbsoluteLocation(true);
+			SkyLight->SetWorldLocation(GetComponentLocation());
+			SkyLight->RegisterComponent();
+		}
+	}
+
+	const UMobSkySettings* Settings = GetDefault<UMobSkySettings>();
+	UMaterialInterface* PanoramaParent = Settings->PanoramaMaterial.LoadSynchronous();
+	if (bDrivesPanorama && !PanoramaCapture && PanoramaParent && Settings->PanoramaTarget.LoadSynchronous())
+	{
+		PanoramaCube = NewObject<UTextureRenderTargetCube>(this);
+		PanoramaCube->Init(PanoramaCaptureResolution, PF_FloatRGBA);
+		PanoramaCube->UpdateResource();
+
+		PanoramaCapture = NewObject<USceneCaptureComponentCube>(Owner, TEXT("MobSkyPanoramaCapture"), RF_Transient);
+		PanoramaCapture->TextureTarget = PanoramaCube;
+		PanoramaCapture->bCaptureEveryFrame = false;
+		PanoramaCapture->bCaptureOnMovement = false;
+		PanoramaCapture->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_UseShowOnlyList;
+		PanoramaCapture->ShowOnlyComponents.Add(this);
+		PanoramaCapture->CaptureSource = SCS_SceneColorHDR;
+		PanoramaCapture->ShowFlags.SetFog(false);
+		PanoramaCapture->ShowFlags.SetAtmosphere(false);
+		PanoramaCapture->SetUsingAbsoluteLocation(true);
+		PanoramaCapture->SetWorldLocation(GetComponentLocation());
+		PanoramaCapture->RegisterComponent();
+
+		PanoramaInstance = MakeInstance(PanoramaParent);
+		if (PanoramaInstance)
+		{
+			PanoramaInstance->SetTextureParameterValue(MobSkyParams::PanoramaSky, PanoramaCube);
+			if (UTextureCube* Cubemap = PanoramaCubemap.LoadSynchronous())
+			{
+				PanoramaInstance->SetTextureParameterValue(MobSkyParams::PanoramaCubemap, Cubemap);
+			}
+		}
+	}
+
+	RecaptureEnvironment();
+}
+
+void UMobSkyComponent::RecaptureEnvironment()
+{
+	CapturedAir = -1.f;
+	// The dome's shaders and the space bake can take the first seconds to arrive, so the first captures
+	// are retaken a few times rather than trusted.
+	EnvironmentRetakes = 6;
+	EnvironmentClock = 0.f;
+}
+
+void UMobSkyComponent::TickEnvironment(float DeltaTime, const FVector& ViewLocation, const FVector& KeyDirection)
+{
+	if (!SkyLight && !PanoramaCapture)
+	{
+		return;
+	}
+
+	// Where shaders are not cooked they compile on demand, and a capture taken meanwhile draws the default
+	// material, so one more is taken whenever a compile finishes.
+	const bool bCompiling = (Instance && Instance->IsCompiling()) || (PanoramaInstance && PanoramaInstance->IsCompiling());
+	const bool bFinishedCompiling = bEnvironmentWasCompiling && !bCompiling;
+	bEnvironmentWasCompiling = bCompiling;
+
+	const float Air = GetAirAmount(ViewLocation.Z);
+	EnvironmentClock -= DeltaTime;
+	const bool bRetake = EnvironmentRetakes > 0 && EnvironmentClock <= 0.f;
+	const bool bChanged = bFinishedCompiling || CapturedAir < 0.f || FMath::Abs(Air - CapturedAir) >= RecaptureAirStep
+		|| FVector::DotProduct(KeyDirection, CapturedKey) < 0.9995f;
+	if (!bRetake && !bChanged)
+	{
+		return;
+	}
+	if (bRetake)
+	{
+		--EnvironmentRetakes;
+		EnvironmentClock = 0.5f;
+	}
+	CapturedAir = Air;
+	CapturedKey = KeyDirection;
+	CaptureEnvironment(ViewLocation);
+}
+
+void UMobSkyComponent::CaptureEnvironment(const FVector& ViewLocation)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(MobSkyComponent::CaptureEnvironment);
+
+	if (SkyLight)
+	{
+		SkyLight->SetWorldLocation(ViewLocation);
+		SkyLight->SetIntensity(SkyLightIntensity);
+		SkyLight->RecaptureSky();
+	}
+
+	UTextureRenderTarget2D* Target = GetDefault<UMobSkySettings>()->PanoramaTarget.Get();
+	if (!PanoramaCapture || !PanoramaInstance || !Target)
+	{
+		return;
+	}
+	PanoramaCapture->SetWorldLocation(ViewLocation);
+	// Taken now rather than deferred, so the panorama below is drawn from this capture and not the last.
+	PanoramaCapture->CaptureScene();
+
+	PanoramaInstance->SetScalarParameterValue(MobSkyParams::PanoramaBlend, PanoramaCubemap.Get() ? CapturedAir : 0.f);
+	PanoramaInstance->SetScalarParameterValue(MobSkyParams::PanoramaIntensity, PanoramaCubemapIntensity);
+	UKismetRenderingLibrary::DrawMaterialToRenderTarget(this, Target, PanoramaInstance);
 }

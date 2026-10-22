@@ -1,4 +1,4 @@
-// Copyright (c) Jared Taylor
+﻿// Copyright (c) Jared Taylor
 
 #include "MobCloudTypes.h"
 
@@ -48,6 +48,10 @@ namespace MobSkyParams
 	const FName GalaxyBulgeColor(TEXT("GalaxyBulgeColor"));
 	const FName DistantA(TEXT("DistantA"));
 	const FName SpaceCube(TEXT("SpaceCube"));
+	const FName PanoramaSky(TEXT("PanoramaSky"));
+	const FName PanoramaCubemap(TEXT("PanoramaCubemap"));
+	const FName PanoramaIntensity(TEXT("PanoramaIntensity"));
+	const FName PanoramaBlend(TEXT("PanoramaBlend"));
 
 	FName Nebula(int32 Index, const TCHAR* Field)
 	{

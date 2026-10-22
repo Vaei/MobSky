@@ -6,6 +6,9 @@ Requires **MobLights**: it reuses MobLights' shader library, fog noise and mater
 
 UE5.8+
 
+> [!CAUTION]
+> Under heavy development - changelog not progressed yet
+
 ## Setting up
 
 1. Enable MobSky. Run **Light → Generate Fog Materials** once if MobLights' fog was never generated.
@@ -54,3 +57,9 @@ Console: `mob.Clouds.Enable`, `mob.Sky.Enable` (show/hide, for measuring cost), 
 - **Nebulae**: up to two, placed by yaw, pitch and radius.
 - **bBakeSpace** bakes the galaxy and nebulae into a cube at BeginPlay, so a game never marches them per pixel. The editor always marches them live.
 - **DayAmbient**, **NightAmbient** and **SpaceAmbient** feed `MPC_MobFog.AmbientColor` while **bDrivesAmbient** is on.
+
+## Changelog
+
+### 1.0.0
+
+* Initial release

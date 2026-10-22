@@ -1,4 +1,4 @@
-// Copyright (c) Jared Taylor
+﻿// Copyright (c) Jared Taylor
 
 #include "MobSkySettings.h"
 
@@ -29,6 +29,8 @@ UMobSkySettings::UMobSkySettings()
 	SkyMaterial = MaterialAt(TEXT("MI_MobSky"));
 	SkyBakedMaterial = MaterialAt(TEXT("MI_MobSky_Baked"));
 	SpaceMaterial = MaterialAt(TEXT("MI_MobSky_Space"));
+	PanoramaMaterial = MaterialAt(TEXT("M_MobSkyPanorama"));
+	PanoramaTarget = TSoftObjectPtr<UTextureRenderTarget2D>(FSoftObjectPath(TEXT("/MobSky/Textures/RT_MobSkyPanorama.RT_MobSkyPanorama")));
 	ParameterCollection = TSoftObjectPtr<UMaterialParameterCollection>(
 		FSoftObjectPath(TEXT("/MobSky/Materials/MPC_MobSky.MPC_MobSky")));
 	ShapeTexture = TSoftObjectPtr<UVolumeTexture>(FSoftObjectPath(TEXT("/MobSky/Textures/T_MobCloudShape.T_MobCloudShape")));

@@ -38,6 +38,7 @@ DETAIL_PATH = TEX_ROOT + '/T_MobCloudDetail'
 WEATHER_PATH = TEX_ROOT + '/T_MobCloudWeather'
 COLOR_TARGET_PATH = TEX_ROOT + '/RT_MobCloudColor'
 DEPTH_TARGET_PATH = TEX_ROOT + '/RT_MobCloudDepth'
+PANORAMA_TARGET_PATH = TEX_ROOT + '/RT_MobSkyPanorama'
 COLLECTION_NAME = 'MPC_MobSky'
 COLLECTION_PATH = MAT_ROOT + '/' + COLLECTION_NAME
 
@@ -583,6 +584,94 @@ def build_sky_material():
 
 
 # ---------------------------------------------------------------------------
+# The sky panorama: RT_MobSkyPanorama and M_MobSkyPanorama
+# ---------------------------------------------------------------------------
+
+def build_panorama_target():
+    """The long/lat sky a MobMaterials surface reflects. Mipped, because the surface picks a mip by roughness."""
+    target = _existing(PANORAMA_TARGET_PATH)
+    if target is None:
+        package, _, name = PANORAMA_TARGET_PATH.rpartition('/')
+        target = _tools().create_asset(name, package, unreal.TextureRenderTarget2D,
+                                       unreal.TextureRenderTargetFactoryNew())
+    target.set_editor_property('size_x', 512)
+    target.set_editor_property('size_y', 256)
+    target.set_editor_property('render_target_format', unreal.TextureRenderTargetFormat.RTF_RGBA16F)
+    target.set_editor_property('auto_generate_mips', True)
+    target.set_editor_property('clear_color', unreal.LinearColor(0.35, 0.45, 0.6, 1.0))
+    target.set_editor_property('address_x', unreal.TextureAddress.TA_WRAP)
+    target.set_editor_property('address_y', unreal.TextureAddress.TA_CLAMP)
+    save(target)
+    _log('target: %s' % PANORAMA_TARGET_PATH)
+    return target
+
+
+# The inverse of MobPanoramaUV in MobMaterials' MobSurface.ush, at a yaw of zero: the panorama is drawn in
+# world space, and the surface turns it by the sky yaw when it reads it.
+_CODE_PANORAMA = """
+const float Phi = (UV.x - 0.5f) * 2.0f * PI;
+const float Theta = UV.y * PI;
+const float3 Dir = float3(sin(Theta) * cos(Phi), sin(Theta) * sin(Phi), cos(Theta));
+const float3 Dome = PanoramaSky.SampleLevel(PanoramaSkySampler, Dir, 0.0f).rgb;
+const float3 Cubemap = PanoramaCubemap.SampleLevel(PanoramaCubemapSampler, Dir, 0.0f).rgb * Intensity;
+// Above the horizon only: a cubemap's ground is not the planet the dome draws beneath the view.
+const float Above = smoothstep(-0.05f, 0.1f, Dir.z);
+return lerp(Dome, Cubemap, saturate(Blend) * Above);
+"""
+
+
+def _cube_object(mat, name, x, y, description):
+    e = _expr(mat, unreal.MaterialExpressionTextureObjectParameter, x, y)
+    e.set_editor_property('parameter_name', name)
+    e.set_editor_property('texture', unreal.load_asset(DEFAULT_CUBE_PATH))
+    e.set_editor_property('group', '00 - Panorama')
+    e.set_editor_property('desc', description)
+    return e
+
+
+def _scalar(mat, name, default, x, y, description):
+    e = _expr(mat, unreal.MaterialExpressionScalarParameter, x, y)
+    e.set_editor_property('parameter_name', name)
+    e.set_editor_property('default_value', default)
+    e.set_editor_property('group', '00 - Panorama')
+    e.set_editor_property('desc', description)
+    return e
+
+
+def build_panorama_material():
+    """Unwraps the captured dome, and the cubemap reflected in its place under air, into the panorama.
+
+    Drawn into RT_MobSkyPanorama by the sky component whenever it recaptures. The names have to agree
+    with MobSkyParams::Panorama*.
+    """
+    mat = _get_or_create_material('M_MobSkyPanorama')
+    mat.set_editor_property('material_domain', unreal.MaterialDomain.MD_SURFACE)
+    mat.set_editor_property('shading_model', unreal.MaterialShadingModel.MSM_UNLIT)
+    mat.set_editor_property('blend_mode', unreal.BlendMode.BLEND_OPAQUE)
+
+    uv = _expr(mat, unreal.MaterialExpressionTextureCoordinate, 0, 0)
+    sky = _cube_object(mat, 'PanoramaSky', 0, 100, 'The dome, captured at the view. Set at runtime.')
+    cubemap = _cube_object(mat, 'PanoramaCubemap', 0, 200, 'Reflected in place of the dome while there is air.')
+    intensity = _scalar(mat, 'PanoramaIntensity', 1.0, 0, 300, 'Brightness of the cubemap.')
+    blend = _scalar(mat, 'PanoramaBlend', 0.0, 0, 360, 'How far the cubemap takes over the sky: the air above the view.')
+
+    node = custom(mat, _CODE_PANORAMA, CMOT.CMOT_FLOAT3,
+                  ['UV', 'PanoramaSky', 'PanoramaCubemap', 'Intensity', 'Blend'],
+                  [], 600, 0, 'The sky as a long/lat panorama.')
+    node.set_editor_property('include_file_paths', [])
+    for name, expr in {'UV': uv, 'PanoramaSky': sky, 'PanoramaCubemap': cubemap,
+                       'Intensity': intensity, 'Blend': blend}.items():
+        link(expr, '', node, name)
+    MEL.connect_material_property(node, '', MP.MP_EMISSIVE_COLOR)
+
+    _spread(MEL.get_material_expressions(mat))
+    MEL.recompile_material(mat)
+    save(mat)
+    _log('M_MobSkyPanorama: %d nodes' % len(MEL.get_material_expressions(mat)))
+    return mat
+
+
+# ---------------------------------------------------------------------------
 # Instances
 # ---------------------------------------------------------------------------
 
@@ -638,4 +727,6 @@ def build_all():
     build_composite_material()
     build_sky_material()
     build_instances()
+    build_panorama_target()
+    build_panorama_material()
     _log('done')
