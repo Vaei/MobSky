@@ -233,7 +233,7 @@ void FMobCloudViewExtension::PreRenderView_RenderThread(FRDGBuilder& GraphBuilde
 	// Clip space to a direction from the camera, and back again for last frame, with the camera's own
 	// position taken out so neither loses precision a long way from the origin.
 	const FViewMatrices& Matrices = InView.ViewMatrices;
-	const FMatrix RelativeToClip = Matrices.GetViewMatrix().RemoveTranslation() * Matrices.GetProjectionNoAAMatrix();
+	const FMatrix RelativeToClip = Matrices.GetWorldToView().RemoveTranslation() * Matrices.GetViewToClipNoAA();
 	const FMatrix44f ClipToRelative(RelativeToClip.Inverse());
 	const FVector Camera = Matrices.GetViewOrigin();
 
@@ -291,7 +291,7 @@ void FMobCloudViewExtension::PreRenderView_RenderThread(FRDGBuilder& GraphBuilde
 		Parameters->Haze = Current.Haze;
 
 		// One of the pass's own pixels, which are larger than the screen's.
-		Parameters->PixelAngle = 2.f / (Size.Y * static_cast<float>(Matrices.GetProjectionNoAAMatrix().M[1][1]));
+		Parameters->PixelAngle = 2.f / (Size.Y * static_cast<float>(Matrices.GetViewToClipNoAA().M[1][1]));
 		Parameters->ShapeTex = Current.Shape->TextureRHI;
 		Parameters->ShapeTexSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 		Parameters->DetailTex = Current.Detail->TextureRHI;
