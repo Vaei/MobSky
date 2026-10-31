@@ -347,20 +347,75 @@ float MobCloudShadow(float3 World, float3 Local, float3 LocalStep, FMobCloud Clo
 	return max(exp2(-Optical), 0.25f * exp2(-0.25f * Optical));
 }
 
-/** Slab entry and exit along a ray from the camera. */
-bool MobCloudRaySlab(float3 Dir, float CamZ, float Lo, float Hi, out float T0, out float T1)
+/** Where A t^2 + B t + C is negative, for A >= 0: a single interval, which may be unbounded or empty. */
+bool MobCloudBelow(float A, float B, float C, out float Lo, out float Hi)
 {
-	if (abs(Dir.z) < 1e-5f)
+	Lo = -1e12f;
+	Hi = 1e12f;
+	if (A < 1e-14f)
 	{
-		T0 = 0.0f;
-		T1 = 1e12f;
-		return CamZ > Lo && CamZ < Hi;
+		if (abs(B) < 1e-8f)
+		{
+			return C < 0.0f;
+		}
+		const float Root = -C / B;
+		Lo = B < 0.0f ? Root : Lo;
+		Hi = B > 0.0f ? Root : Hi;
+		return true;
 	}
 
-	const float A = (Lo - CamZ) / Dir.z;
-	const float B = (Hi - CamZ) / Dir.z;
-	T0 = max(min(A, B), 0.0f);
-	T1 = max(A, B);
+	const float Disc = B * B - 4.0f * A * C;
+	if (Disc < 0.0f)
+	{
+		return false;
+	}
+	// The stable pair of roots: the textbook form loses the near one to cancellation when A is tiny.
+	const float Q = -0.5f * (B + (B < 0.0f ? -1.0f : 1.0f) * sqrt(Disc));
+	const float R0 = Q / A;
+	const float R1 = abs(Q) > 1e-20f ? C / Q : R0;
+	Lo = min(R0, R1);
+	Hi = max(R0, R1);
+	return true;
+}
+
+/**
+ * Where a ray from the camera is inside a layer bent around the planet, by the same curvature
+ * MobCloudHeightFraction applies: from T0 to T1, less the stretch in Gap where it passes under the base.
+ *
+ * Exact rather than a slab widened by the bend, which from high up is tens of kilometres deep around a
+ * deck one or two thick, and spreads the march's steps so thin that only one or two land in cloud.
+ */
+bool MobCloudRayShell(float3 Dir, FMobCloud Cloud, out float T0, out float T1, out float2 Gap)
+{
+	// Height above the flat world along the ray is CamZ + Dir.z t + A t^2.
+	const float A = dot(Dir.xy, Dir.xy) / (2.0f * max(Cloud.PlanetRadius, 1.0f));
+	const float CamZ = Cloud.CamWorld.z;
+	Gap = 1e12f;
+
+	if (!MobCloudBelow(A, Dir.z, CamZ - Cloud.Top, T0, T1))
+	{
+		return false;
+	}
+	T0 = max(T0, 0.0f);
+
+	float Lo, Hi;
+	if (MobCloudBelow(A, Dir.z, CamZ - Cloud.Base, Lo, Hi) && Hi > T0)
+	{
+		// The surface is world Z 0. A ray from above that reaches it under the layer never comes back up.
+		float GroundLo, GroundHi;
+		if (CamZ > 0.0f && MobCloudBelow(A, Dir.z, CamZ, GroundLo, GroundHi) && GroundHi > 0.0f)
+		{
+			T1 = min(T1, Lo);
+		}
+		else if (Lo <= T0)
+		{
+			T0 = Hi;
+		}
+		else
+		{
+			Gap = float2(Lo, Hi);
+		}
+	}
 	return T1 > T0;
 }
 
@@ -439,6 +494,7 @@ float4 MobCloudMarch(float3 PixelCamRel, float3 SurfaceCamRel, float3 CentreCamR
 
 	float T0, T1;
 	float Reach;
+	float2 Gap = 1e12f;
 	if (Cloud.IsVolume > 0.5f)
 	{
 		if (!MobFogRayEllipsoid(Dir, CentreCamRel, AxisX, AxisY, AxisZ, Extent, T0, T1))
@@ -450,13 +506,10 @@ float4 MobCloudMarch(float3 PixelCamRel, float3 SurfaceCamRel, float3 CentreCamR
 	}
 	else
 	{
-		// The slab is widened downwards by the most the planet can bend it within reach, and the
-		// density function trims it back.
 		const float Above = max(Cloud.CamWorld.z - Cloud.Top, 0.0f);
 		Reach = Cloud.MaxDistance + Above * Cloud.ReachPerHeight;
-		const float Bend = Reach * Reach / (2.0f * max(Cloud.PlanetRadius, 1.0f));
 
-		if (!MobCloudRaySlab(Dir, Cloud.CamWorld.z, Cloud.Base - Bend, Cloud.Top, T0, T1))
+		if (!MobCloudRayShell(Dir, Cloud, T0, T1, Gap))
 		{
 			return 0.0f;
 		}
@@ -490,7 +543,7 @@ float4 MobCloudMarch(float3 PixelCamRel, float3 SurfaceCamRel, float3 CentreCamR
 		dot(Cloud.KeyDir, AxisZ)) / max(Extent, 1e-3f);
 
 	const int StepCount = clamp(Steps, 4, 96);
-	const float Span = T1 - T0;
+	const float Span = T1 - T0 - max(min(Gap.y, T1) - max(Gap.x, T0), 0.0f);
 
 	// Step length grows with distance, so a cloud beside you is resolved finely and one at the horizon,
 	// which covers a few pixels, is not paid for as though it were near. Empty air is crossed four times
@@ -516,6 +569,14 @@ float4 MobCloudMarch(float3 PixelCamRel, float3 SurfaceCamRel, float3 CentreCamR
 	LOOP
 	for (int Step = 0; Step < Budget && T < T1; ++Step)
 	{
+		if (T > Gap.x && T < Gap.y)
+		{
+			T = Gap.y;
+			bDense = false;
+			EmptyRun = 0;
+			continue;
+		}
+
 		const float Fine = min(max(MinStep, T * Ratio), MaxStep);
 		const float StepLength = bDense ? Fine : Fine * 4.0f;
 

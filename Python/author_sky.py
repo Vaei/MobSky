@@ -51,6 +51,9 @@ COLLECTION_VECTORS = [
     # and amount; then wind, where the painted deck takes over, and the deck's height.
     ('FarCloudsA', (3000000.0, 0.0, 150000000.0, 0.6)),
     ('FarCloudsB', (800.0, 250.0, 6000000.0, 300000.0)),
+
+    # The lowest base of any visible layer, in x. Far below the world when there is none.
+    ('CloudFloor', (-1.0e9, 0.0, 0.0, 0.0)),
 ]
 DEFAULT_CUBE_PATH = '/Engine/EngineResources/DefaultTextureCube'
 
@@ -359,7 +362,11 @@ const float2 Depths = DepthTex.SampleLevel(DepthTexSampler, ScreenUV, 0.0f).rg *
 // of it between the ship and the camera.
 const float Scene = length(SurfacePos);
 const float Cover = Depths.y > 0.0f ? saturate((Scene - Depths.x) / max(Depths.y - Depths.x, 1.0f)) : 1.0f;
-return Cloud * Cover;
+
+// Seen from above the cloud, a surface under its base is behind all of it. By height rather than by
+// distance: the layer bends down with the planet and a flat sea does not, so far off the sea is nearer.
+const bool bUnder = CamZ > Floor && CamZ + SurfacePos.z < Floor;
+return Cloud * (bUnder ? 1.0f : Cover);
 """
 
 
@@ -372,18 +379,21 @@ def build_composite_material():
     mat.set_editor_property('disable_depth_test', True)
     mat.set_editor_property('use_translucency_vertex_fog', False)
 
-    _, surface_rel, _, _, screen_uv = _view_inputs(mat)
+    _, surface_rel, cam_pos, _, screen_uv = _view_inputs(mat)
+    sky_collection = unreal.load_asset(COLLECTION_PATH)
+    floor = _mask(mat, _collection_param(mat, sky_collection, 'CloudFloor', 0, 1200), 'r', 100, 1200)
+    cam_z = _mask(mat, cam_pos, 'b', 100, 1260)
 
     color_tex = _texture_object(mat, 'CloudColor', COLOR_TARGET_PATH, '00 - Pass', 0, 1000,
                                 'Inscatter and coverage, from the render pass.')
     depth_tex = _texture_object(mat, 'CloudDepth', DEPTH_TARGET_PATH, '00 - Pass', 0, 1060,
                                 'Where the cloud starts and where it has done most of its covering.')
 
-    node = custom(mat, _CODE_COMPOSITE, CMOT.CMOT_FLOAT4, ['ScreenUV', 'SurfacePos', 'ColorTex', 'DepthTex'],
+    node = custom(mat, _CODE_COMPOSITE, CMOT.CMOT_FLOAT4, ['ScreenUV', 'SurfacePos', 'ColorTex', 'DepthTex', 'CamZ', 'Floor'],
                   [], 800, 0, 'The render pass result, put in front of or behind the scene.')
     node.set_editor_property('include_file_paths', [])
     for name, expr in {'ScreenUV': screen_uv, 'SurfacePos': surface_rel,
-                       'ColorTex': color_tex, 'DepthTex': depth_tex}.items():
+                       'ColorTex': color_tex, 'DepthTex': depth_tex, 'CamZ': cam_z, 'Floor': floor}.items():
         link(expr, '', node, name)
 
     MEL.connect_material_property(_mask(mat, node, 'rgb', 900, 0), '', MP.MP_EMISSIVE_COLOR)

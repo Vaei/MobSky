@@ -46,6 +46,7 @@ namespace
 	const FName FogTimeName(TEXT("FogTime"));
 	const FName FarCloudsAName(TEXT("FarCloudsA"));
 	const FName FarCloudsBName(TEXT("FarCloudsB"));
+	const FName CloudFloorName(TEXT("CloudFloor"));
 
 	// Well inside the dome and well past the near plane. The composite draws without a depth test, so
 	// the radius only has to keep the camera inside it.
@@ -128,7 +129,7 @@ bool UMobSkySubsystem::GatherCloudFrame(FMobCloudFrame& Out, FIntPoint Size) con
 			return false;
 		}
 #endif
-		if (!Texture->GetResource() || Texture->IsDefaultTexture())
+		if (!Texture->GetResource())
 		{
 			return false;
 		}
@@ -396,6 +397,7 @@ void UMobSkySubsystem::PublishFarClouds(const FVector& View) const
 	// The heaviest deck is the one seen from orbit; a thin sheet of cirrus above it is not.
 	const UMobCloudComponent* Deck = nullptr;
 	float Heaviest = 0.f;
+	float Floor = TNumericLimits<float>::Max();
 	for (const TWeakObjectPtr<UMobCloudComponent>& Cloud : Clouds)
 	{
 		const UMobCloudComponent* Component = Cloud.Get();
@@ -403,6 +405,7 @@ void UMobSkySubsystem::PublishFarClouds(const FVector& View) const
 		{
 			continue;
 		}
+		Floor = FMath::Min(Floor, Component->BaseHeight);
 		const float Weight = (Component->TopHeight - Component->BaseHeight) * Component->Density;
 		if (Weight > Heaviest)
 		{
@@ -410,6 +413,9 @@ void UMobSkySubsystem::PublishFarClouds(const FVector& View) const
 			Deck = Component;
 		}
 	}
+
+	const float PublishedFloor = Floor < TNumericLimits<float>::Max() ? Floor : -1.0e9f;
+	UKismetMaterialLibrary::SetVectorParameterValue(World, Collection, CloudFloorName, FLinearColor(PublishedFloor, 0.f, 0.f, 0.f));
 
 	if (!Deck)
 	{
