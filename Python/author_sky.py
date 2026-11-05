@@ -415,7 +415,7 @@ def build_composite_material():
 _CODE_LENS_FLARE = """
 FMobSun Sun = MobSunVisibility(normalize(KeyDir + float3(0.0f, 0.0f, 1e-5f)), CamZ, Planet, Planet.w,
     Shape.x, Shape.y, CloudTex, CloudTexSampler);
-return MobLensFlare(ScreenUV, Sun, KeyColor, Amounts, Aperture) + min(SceneZ, 0.0f) * 0.0f;
+return MobLensFlare(ScreenUV, Sun, KeyColor, Amounts, Aperture, Shape.z) + min(SceneZ, 0.0f) * 0.0f;
 """
 
 
@@ -437,12 +437,12 @@ def build_lens_flare_material():
     key_color = _mask(mat, _collection_param(mat, fog, 'KeyColor', 0, 500), 'rgb', 100, 500)
     planet = _collection_param(mat, fog, 'SunPlanet', 0, 600)
 
-    amounts = _vector(mat, 'FlareAmounts', (0.3, 0.025, 0.6, 0.3), '00 - Flare', 0, 700,
+    amounts = _vector(mat, 'FlareAmounts', (0.3, 0.025, 1.0, 0.3), '00 - Flare', 0, 700,
                       'Ghosts, halo and starburst, and how far the starburst reaches in screen heights at f/16. The subsystem writes it from the sky.')
     aperture = _vector(mat, 'FlareAperture', (7.0, 16.0, 0.26, 0.0), '00 - Flare', 0, 750,
                        'Blade count, f-number and blade rotation in radians. The subsystem writes it from the sky or the camera.')
-    shape = _vector(mat, 'FlareShape', (10000000.0, 0.08, 0.0, 0.0), '00 - Flare', 0, 800,
-                    'Scene depth that counts as sky, and how far past the edge the sun keeps a flare.')
+    shape = _vector(mat, 'FlareShape', (10000000.0, 0.08, 20.0, 0.0), '00 - Flare', 0, 800,
+                    'Scene depth that counts as sky, how far past the edge the sun keeps a flare, and the sun disc brightness.')
     cloud_tex = _texture_object(mat, 'CloudColor', COLOR_TARGET_PATH, '00 - Flare', 0, 900,
                                 'The cloud render pass, whose coverage hides the sun.')
 

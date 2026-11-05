@@ -153,12 +153,14 @@ float MobFlareGhost(float2 Delta, float Radius, FMobAperture Aperture)
 
 /**
  * Diffraction off the blade edges: a spike pair per edge, so as many spikes as blades when the count is even
- * and twice as many when it is odd. Spikes are thin, taper to points and stretch with the f-number, and the
- * longer wavelengths reach further, which leaves the tips fringed warm. Opened up, they give way to a glow.
+ * and twice as many when it is odd. The spikes grow out of the disc at its own brightness and thin to points,
+ * so the sun and its star read as one shape, and the longer wavelengths reach further, which fringes the tips
+ * warm. Opened up, the spikes give way to a soft glow. In units of the disc's brightness.
  */
-float3 MobFlareStarburst(float2 ToSun, FMobAperture Aperture, float Length)
+float3 MobFlareStarburst(float2 ToSun, FMobAperture Aperture, float Length, float DiscRadius)
 {
 	const float D = length(ToSun);
+	const float R = max(DiscRadius, 1e-4f);
 	const bool bOdd = frac(Aperture.Blades * 0.5f) > 0.25f;
 	const float Spikes = bOdd ? Aperture.Blades * 2.0f : Aperture.Blades;
 	const float Sector = 2.0f * PI / Spikes;
@@ -171,17 +173,18 @@ float3 MobFlareStarburst(float2 ToSun, FMobAperture Aperture, float Length)
 	const float Edge = fmod(Nearest, Spikes * 0.5f);
 	const float Jitter = 0.8f + 0.4f * frac(sin(Edge * 12.9898f + 3.1f) * 43758.5453f);
 
-	const float Stopped = smoothstep(3.5f, 16.0f, Aperture.FStop);
+	const float Stopped = smoothstep(4.0f, 14.0f, Aperture.FStop);
 	const float3 Wavelength = float3(1.15f, 1.0f, 0.82f);
-	const float3 Reach = max(Length * (Aperture.FStop / 16.0f) * Jitter * Wavelength, 1e-4f);
+	const float3 Reach = max(Length * (Aperture.FStop / 16.0f) * Jitter * Wavelength, R * 2.0f);
 	const float3 Along = saturate(1.0f - D / Reach);
-	const float3 Width = 0.0016f * Wavelength * (0.25f + 0.75f * Along);
-	const float3 Across = Perp / Width;
-	const float3 Spike = exp(-Across * Across) * Along * Along * (0.03f / (0.03f + D));
 
-	// Wide open, the sun is a soft bright blob rather than a star.
-	const float GlowRadius = 0.012f * sqrt(16.0f / Aperture.FStop);
-	const float Glow = exp(-D / GlowRadius) * (0.35f + 0.65f * (1.0f - Stopped));
+	// 1 at the disc's edge, so there is no seam between the sun and its spikes.
+	const float Near = R / max(D, R);
+	const float3 Width = 0.0007f * Wavelength + R * 0.6f * Near;
+	const float3 Across = Perp / Width;
+	const float3 Spike = exp(-Across * Across) * pow(Near, 1.4f) * Along * Along;
+
+	const float Glow = exp(-max(D - R, 0.0f) / (R * 4.0f)) * (1.0f - Stopped) * 0.25f;
 
 	return Spike * Stopped + Glow;
 }
@@ -191,9 +194,10 @@ float3 MobFlareStarburst(float2 ToSun, FMobAperture Aperture, float Length)
  *
  * Ghosts lie along the line from the sun through the screen's centre, a faint rainbow ring circles
  * the sun, and the aperture's starburst radiates from it. Amounts are ghosts, halo, starburst and the
- * starburst's length in screen heights at f/16. Aperture is blades, f-number and rotation.
+ * starburst's length in screen heights at f/16. Aperture is blades, f-number and rotation. SunBrightness
+ * is the sky's sun disc, which the starburst is scaled to so that it grows out of the disc.
  */
-float3 MobLensFlare(float2 UV, FMobSun Sun, float3 SunColor, float4 Amounts, float4 PackedAperture)
+float3 MobLensFlare(float2 UV, FMobSun Sun, float3 SunColor, float4 Amounts, float4 PackedAperture, float SunBrightness)
 {
 	if (Sun.Visible <= 1e-3f)
 	{
@@ -242,7 +246,8 @@ float3 MobLensFlare(float2 UV, FMobSun Sun, float3 SunColor, float4 Amounts, flo
 	const float3 Ring = exp(-RingOffset * RingOffset);
 
 	// More of the sun showing throws longer spikes, as a brighter source does.
-	const float3 Star = MobFlareStarburst(ToSun, Aperture, max(Amounts.w, 1e-3f) * sqrt(Sun.Visible));
+	const float3 Star = MobFlareStarburst(ToSun, Aperture, max(Amounts.w, 1e-3f) * sqrt(Sun.Visible), Sun.RadiusUV)
+		* SunBrightness;
 
 	return SunColor * Sun.Visible * (Ghost * Amounts.x + Ring * Amounts.y + Star * Amounts.z);
 }

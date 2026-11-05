@@ -620,6 +620,6 @@ void UMobSkySubsystem::TickLensFlare(const FVector& View)
 	const FLinearColor Amounts(Sky->GhostAmount * Sky->FlareIntensity, Sky->HaloAmount * Sky->FlareIntensity,
 		Sky->StarburstAmount * Sky->FlareIntensity, Sky->StarburstLength);
 	SetVectorIfChanged(*LensFlareInstance, FlareAmountsName, Amounts);
-	SetVectorIfChanged(*LensFlareInstance, FlareShapeName, FLinearColor(Sky->FlareSkyDepth, Sky->FlareEdgeMargin, 0.f, 0.f));
+	SetVectorIfChanged(*LensFlareInstance, FlareShapeName, FLinearColor(Sky->FlareSkyDepth, Sky->FlareEdgeMargin, Sky->SunIntensity, 0.f));
 	SetVectorIfChanged(*LensFlareInstance, FlareApertureName, ResolveAperture(*World, *Sky));
 }

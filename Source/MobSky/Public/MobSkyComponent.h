@@ -232,8 +232,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", ClampMin="0"))
 	float HaloAmount = 0.025f;
 
+	/** The spikes' brightness where they leave the sun's disc, against the disc's own. 1 makes the sun and its star one shape. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", ClampMin="0"))
-	float StarburstAmount = 0.6f;
+	float StarburstAmount = 1.f;
 
 	/** How far the starburst's spikes reach at f/16, in screen heights. They stretch and shrink with the f-number. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", UIMin="0.02", UIMax="1", ClampMin="0.001"))
