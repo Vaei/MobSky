@@ -98,7 +98,7 @@ namespace
 			}
 		}
 
-		return FLinearColor(Blades, FStop, FMath::DegreesToRadians(Sky.ApertureRotation), 0.f);
+		return FLinearColor(Blades, FStop, FMath::DegreesToRadians(Sky.ApertureRotation), Sky.StarburstFringe);
 	}
 
 	UStaticMeshComponent* SpawnCameraProxy(UWorld& World, UMaterialInterface& Material, FName Name, int32 SortPriority, TObjectPtr<AActor>& OutOwner)

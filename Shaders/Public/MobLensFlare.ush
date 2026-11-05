@@ -116,6 +116,7 @@ struct FMobAperture
 	float Blades;
 	float FStop;
 	float Rotation;
+	float Fringe;
 };
 
 FMobAperture MobFlareAperture(float4 Packed)
@@ -124,6 +125,7 @@ FMobAperture MobFlareAperture(float4 Packed)
 	Aperture.Blades = max(round(Packed.x), 3.0f);
 	Aperture.FStop = max(Packed.y, 1.0f);
 	Aperture.Rotation = Packed.z;
+	Aperture.Fringe = max(Packed.w, 0.0f);
 	return Aperture;
 }
 
@@ -153,9 +155,10 @@ float MobFlareGhost(float2 Delta, float Radius, FMobAperture Aperture)
 
 /**
  * Diffraction off the blade edges: a spike pair per edge, so as many spikes as blades when the count is even
- * and twice as many when it is odd. The spikes grow out of the disc at its own brightness and thin to points,
- * so the sun and its star read as one shape, and the longer wavelengths reach further, which fringes the tips
- * warm. Opened up, the spikes give way to a soft glow. In units of the disc's brightness.
+ * and twice as many when it is odd. The spikes grow out of the disc at its own brightness, so the sun and its
+ * star read as one shape, and spread wider as they leave it. Diffraction scales with wavelength, so red spreads
+ * widest and reaches furthest, and the fringes along a spike fall apart into colour with distance. Opened up,
+ * the spikes give way to a soft glow. In units of the disc's brightness.
  */
 float3 MobFlareStarburst(float2 ToSun, FMobAperture Aperture, float Length, float DiscRadius)
 {
@@ -180,9 +183,20 @@ float3 MobFlareStarburst(float2 ToSun, FMobAperture Aperture, float Length, floa
 
 	// 1 at the disc's edge, so there is no seam between the sun and its spikes.
 	const float Near = R / max(D, R);
-	const float3 Width = 0.0007f * Wavelength + R * 0.6f * Near;
+	const float3 Spread = (0.0007f + D * 0.018f) * Wavelength;
+	const float3 Width = Spread + R * 0.6f * Near;
 	const float3 Across = Perp / Width;
-	const float3 Spike = exp(-Across * Across) * pow(Near, 1.4f) * Along * Along;
+
+	// Widening spreads the same light thinner.
+	const float3 Thinning = sqrt((0.0007f * Wavelength + R * 0.6f) / Width);
+
+	// Bands along the spike, spaced by wavelength, so the channels drift out of step further out.
+	const float3 Phase = D / (0.035f * Wavelength) * 2.0f * PI;
+	const float3 Bands = 0.5f + 0.5f * cos(Phase);
+	const float Split = saturate(Aperture.Fringe * D / max(Reach.g * 0.35f, 1e-4f));
+	const float3 Fringe = lerp(1.0f, 0.35f + 1.3f * Bands, Split);
+
+	const float3 Spike = exp(-Across * Across) * pow(Near, 1.4f) * Along * Along * Thinning * Fringe;
 
 	const float Glow = exp(-max(D - R, 0.0f) / (R * 4.0f)) * (1.0f - Stopped) * 0.25f;
 

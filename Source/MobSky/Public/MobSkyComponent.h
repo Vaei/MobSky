@@ -255,6 +255,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", Units="Degrees"))
 	float ApertureRotation = 15.f;
 
+	/** How strongly the spikes split into colour as they widen away from the sun. 0 leaves them the sun's colour. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", UIMin="0", UIMax="2", ClampMin="0"))
+	float StarburstFringe = 1.f;
+
 	/** Scene depth past which a pixel counts as sky, so anything nearer covers the sun. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", AdvancedDisplay, meta=(EditCondition="bLensFlare", Units="Centimeters", ClampMin="0"))
 	float FlareSkyDepth = 10000000.f;

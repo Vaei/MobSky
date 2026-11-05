@@ -439,8 +439,8 @@ def build_lens_flare_material():
 
     amounts = _vector(mat, 'FlareAmounts', (0.3, 0.025, 1.0, 0.3), '00 - Flare', 0, 700,
                       'Ghosts, halo and starburst, and how far the starburst reaches in screen heights at f/16. The subsystem writes it from the sky.')
-    aperture = _vector(mat, 'FlareAperture', (7.0, 16.0, 0.26, 0.0), '00 - Flare', 0, 750,
-                       'Blade count, f-number and blade rotation in radians. The subsystem writes it from the sky or the camera.')
+    aperture = _vector(mat, 'FlareAperture', (7.0, 16.0, 0.26, 1.0), '00 - Flare', 0, 750,
+                       'Blade count, f-number, blade rotation in radians and colour fringing. The subsystem writes it from the sky or the camera.')
     shape = _vector(mat, 'FlareShape', (10000000.0, 0.08, 20.0, 0.0), '00 - Flare', 0, 800,
                     'Scene depth that counts as sky, how far past the edge the sun keeps a flare, and the sun disc brightness.')
     cloud_tex = _texture_object(mat, 'CloudColor', COLOR_TARGET_PATH, '00 - Flare', 0, 900,
