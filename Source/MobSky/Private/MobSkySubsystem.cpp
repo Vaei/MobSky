@@ -16,6 +16,8 @@
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/VolumeTexture.h"
 #include "Engine/World.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
 #include "GameFramework/Actor.h"
 #include "HAL/IConsoleManager.h"
 #include "Kismet/KismetMaterialLibrary.h"
@@ -58,6 +60,7 @@ namespace
 
 	const FName FlareAmountsName(TEXT("FlareAmounts"));
 	const FName FlareShapeName(TEXT("FlareShape"));
+	const FName FlareApertureName(TEXT("FlareAperture"));
 
 	// Well inside the dome and well past the near plane. The composite draws without a depth test, so
 	// the radius only has to keep the camera inside it.
@@ -65,6 +68,38 @@ namespace
 
 	/** Over every other translucency, glass and the cloud composite included: the flare is in the lens. */
 	constexpr int32 LensFlareSortPriority = 1000;
+
+	void SetVectorIfChanged(UMaterialInstanceDynamic& Instance, FName Name, const FLinearColor& Value)
+	{
+		FLinearColor Current;
+		if (!Instance.GetVectorParameterValue(FMaterialParameterInfo(Name), Current) || !Current.Equals(Value))
+		{
+			Instance.SetVectorParameterValue(Name, Value);
+		}
+	}
+
+	/** The sky's aperture, with the player camera's depth of field blade count and f-stop wherever it sets them. */
+	FLinearColor ResolveAperture(const UWorld& World, const UMobSkyComponent& Sky)
+	{
+		float Blades = Sky.ApertureBlades;
+		float FStop = Sky.ApertureFStop;
+
+		const APlayerController* Player = World.GetFirstPlayerController();
+		if (const APlayerCameraManager* Camera = Player ? Player->PlayerCameraManager.Get() : nullptr)
+		{
+			const FPostProcessSettings& Post = Camera->GetCameraCacheView().PostProcessSettings;
+			if (Post.bOverride_DepthOfFieldBladeCount)
+			{
+				Blades = Post.DepthOfFieldBladeCount;
+			}
+			if (Post.bOverride_DepthOfFieldFstop)
+			{
+				FStop = Post.DepthOfFieldFstop;
+			}
+		}
+
+		return FLinearColor(Blades, FStop, FMath::DegreesToRadians(Sky.ApertureRotation), 0.f);
+	}
 
 	UStaticMeshComponent* SpawnCameraProxy(UWorld& World, UMaterialInterface& Material, FName Name, int32 SortPriority, TObjectPtr<AActor>& OutOwner)
 	{
@@ -584,14 +619,7 @@ void UMobSkySubsystem::TickLensFlare(const FVector& View)
 
 	const FLinearColor Amounts(Sky->GhostAmount * Sky->FlareIntensity, Sky->HaloAmount * Sky->FlareIntensity,
 		Sky->StarburstAmount * Sky->FlareIntensity, Sky->StarburstLength);
-	const FLinearColor Shape(Sky->FlareSkyDepth, Sky->FlareEdgeMargin, 0.f, 0.f);
-	FLinearColor CurrentAmounts;
-	FLinearColor CurrentShape;
-	LensFlareInstance->GetVectorParameterValue(FMaterialParameterInfo(FlareAmountsName), CurrentAmounts);
-	LensFlareInstance->GetVectorParameterValue(FMaterialParameterInfo(FlareShapeName), CurrentShape);
-	if (!CurrentAmounts.Equals(Amounts) || !CurrentShape.Equals(Shape))
-	{
-		LensFlareInstance->SetVectorParameterValue(FlareAmountsName, Amounts);
-		LensFlareInstance->SetVectorParameterValue(FlareShapeName, Shape);
-	}
+	SetVectorIfChanged(*LensFlareInstance, FlareAmountsName, Amounts);
+	SetVectorIfChanged(*LensFlareInstance, FlareShapeName, FLinearColor(Sky->FlareSkyDepth, Sky->FlareEdgeMargin, 0.f, 0.f));
+	SetVectorIfChanged(*LensFlareInstance, FlareApertureName, ResolveAperture(*World, *Sky));
 }

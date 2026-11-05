@@ -233,11 +233,26 @@ public:
 	float HaloAmount = 0.025f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", ClampMin="0"))
-	float StarburstAmount = 0.45f;
+	float StarburstAmount = 0.6f;
 
-	/** How far the starburst's spokes reach, in screen heights. */
+	/** How far the starburst's spikes reach at f/16, in screen heights. They stretch and shrink with the f-number. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", UIMin="0.02", UIMax="1", ClampMin="0.001"))
-	float StarburstLength = 0.12f;
+	float StarburstLength = 0.3f;
+
+	/**
+	 * The aperture's blade count. An even count gives that many spikes and an odd count twice as many, so 7 blades
+	 * make a 14-point star. Overridden by the camera's depth of field blade count when it sets one.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", ClampMin="3", ClampMax="16"))
+	int32 ApertureBlades = 7;
+
+	/** The f-number: f/16 and up throws long sharp spikes, f/4 and below a soft round glow. Overridden by the camera's depth of field f-stop when it sets one. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", UIMin="1.4", UIMax="32", ClampMin="1"))
+	float ApertureFStop = 16.f;
+
+	/** Turns the blades, and with them the spikes and the ghosts' corners, on the screen. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", Units="Degrees"))
+	float ApertureRotation = 15.f;
 
 	/** Scene depth past which a pixel counts as sky, so anything nearer covers the sun. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", AdvancedDisplay, meta=(EditCondition="bLensFlare", Units="Centimeters", ClampMin="0"))
