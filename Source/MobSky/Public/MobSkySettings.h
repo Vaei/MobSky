@@ -72,6 +72,10 @@ public:
 	UPROPERTY(EditAnywhere, Config, Category="Clouds|Render Pass")
 	TSoftObjectPtr<UMaterialInterface> CompositeMaterial;
 
+	/** The sun's lens flare, drawn over everything on a proxy round the camera. */
+	UPROPERTY(EditAnywhere, Config, Category="Sky")
+	TSoftObjectPtr<UMaterialInterface> LensFlareMaterial;
+
 	/** The inside-out sphere the clouds and the dome rasterise. MobLights' fog proxy. */
 	UPROPERTY(EditAnywhere, Config, Category="Proxy")
 	TSoftObjectPtr<UStaticMesh> ProxyMesh;

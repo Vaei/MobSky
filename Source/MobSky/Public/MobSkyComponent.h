@@ -216,6 +216,37 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Nebulae", meta=(TitleProperty="Radius"))
 	TArray<FMobSkyNebula> Nebulae;
 
+	/**
+	 * Draws the sun's lens flare over the view: ghosts, a halo and a starburst. It fades as opaque geometry,
+	 * the horizon or the cloud layers cover the sun, and translucent glass does not cover it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare")
+	bool bLensFlare = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", ClampMin="0"))
+	float FlareIntensity = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", ClampMin="0"))
+	float GhostAmount = 0.3f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", ClampMin="0"))
+	float HaloAmount = 0.025f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", ClampMin="0"))
+	float StarburstAmount = 0.45f;
+
+	/** How far the starburst's spokes reach, in screen heights. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", meta=(EditCondition="bLensFlare", UIMin="0.02", UIMax="1", ClampMin="0.001"))
+	float StarburstLength = 0.12f;
+
+	/** Scene depth past which a pixel counts as sky, so anything nearer covers the sun. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", AdvancedDisplay, meta=(EditCondition="bLensFlare", Units="Centimeters", ClampMin="0"))
+	float FlareSkyDepth = 10000000.f;
+
+	/** How far past the screen's edge, in screen heights, the sun keeps a fading flare. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Lens Flare", AdvancedDisplay, meta=(EditCondition="bLensFlare", ClampMin="0.001"))
+	float FlareEdgeMargin = 0.08f;
+
 	/** Bakes the galaxy and nebulae into a cube at BeginPlay, so a game never marches them per pixel. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Cost")
 	bool bBakeSpace = true;

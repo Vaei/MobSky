@@ -9,6 +9,7 @@
 class FMobCloudViewExtension;
 class FSceneView;
 class UMobCloudComponent;
+class UMaterialInstanceDynamic;
 class UMobSkyComponent;
 class UStaticMeshComponent;
 struct FMobCloudFrame;
@@ -44,7 +45,8 @@ public:
 
 	/**
 	 * Hides whichever way of drawing the cloud layers this view is not using: the composite from every
-	 * view but the one the render pass runs for, and the marching layers from that one. Game thread.
+	 * view but the one the render pass runs for, and the marching layers from that one. Hides the lens
+	 * flare from captures, which are not looking through a lens. Game thread.
 	 */
 	void HideForView(FSceneView& View, bool bRenderPassView) const;
 
@@ -76,6 +78,21 @@ protected:
 
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> CompositeOwner;
+
+	/** Keeps the lens flare on the camera and its parameters on the sky's, and makes it the first time it is wanted. */
+	void TickLensFlare(const FVector& View);
+
+	/** The planet and the cloud pass, as the lens flare and any glass reading MobSunVisibility need them. */
+	void PublishSun(const UMobSkyComponent* Sky) const;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMeshComponent> LensFlare;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> LensFlareInstance;
+
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> LensFlareOwner;
 
 	TSharedPtr<FMobCloudViewExtension, ESPMode::ThreadSafe> Extension;
 	FVector LastView = FVector::ZeroVector;

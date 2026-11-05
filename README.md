@@ -35,8 +35,10 @@ From above the air, the sky paints the heaviest deck onto the planet past the la
 | No clouds for the first second of play | The pass waits for its noise textures to finish building in an uncooked build |
 | Clouds vanish in the distance | **MaxDistance** / **ReachPerHeight** on the layer |
 | Nothing renders at all | Materials not generated, or MobLights' `MPC_MobFog` missing |
+| No lens flare | `M_MobLensFlare` not generated, **bLensFlare** off, or the sun is behind anything nearer than **FlareSkyDepth** |
+| Lens flare shows through a hull or frame | That surface is translucent and writes no depth. Only opaque geometry covers the sun |
 
-Console: `mob.Clouds.Enable`, `mob.Sky.Enable` (show/hide, for measuring cost), `mob.Sky.Bake`, `mob.Clouds.RenderPass`, `mob.Clouds.Resolution` (0.5 is half resolution), `mob.Clouds.History` (0.9), `mob.Clouds.Checkerboard` (1 marches one pixel of each 2x2 block a frame and rebuilds the rest from history). Set `mob.Clouds.RenderPass` in `[ConsoleVariables]` to A/B from the first frame; `-ExecCmds` arrives after BeginPlay.
+Console: `mob.Clouds.Enable`, `mob.Sky.Enable` (show/hide, for measuring cost), `mob.Sky.Bake`, `mob.Clouds.RenderPass`, `mob.Clouds.Resolution` (0.5 is half resolution), `mob.Clouds.History` (0.9), `mob.Clouds.Checkerboard` (1 marches one pixel of each 2x2 block a frame and rebuilds the rest from history), `mob.Sky.LensFlare`. Set `mob.Clouds.RenderPass` in `[ConsoleVariables]` to A/B from the first frame; `-ExecCmds` arrives after BeginPlay.
 
 ## Tuning
 
@@ -57,6 +59,11 @@ Console: `mob.Clouds.Enable`, `mob.Sky.Enable` (show/hide, for measuring cost), 
 - **Nebulae**: up to two, placed by yaw, pitch and radius.
 - **bBakeSpace** bakes the galaxy and nebulae into a cube at BeginPlay, so a game never marches them per pixel. The editor always marches them live.
 - **DayAmbient**, **NightAmbient** and **SpaceAmbient** feed `MPC_MobFog.AmbientColor` while **bDrivesAmbient** is on.
+
+**Lens flare:**
+- **FlareIntensity** scales **GhostAmount**, **HaloAmount** and **StarburstAmount**; **StarburstLength** is in screen heights.
+- The flare fades as opaque geometry, the horizon or the cloud render pass covers the sun. Glass covers nothing.
+- For a matching glare on glass, call `MobSunVisibility` from `/MobSky/Public/MobLensFlare.ush` in a translucent material that reads `MPC_MobFog.SunPlanet`.
 
 ## Changelog
 

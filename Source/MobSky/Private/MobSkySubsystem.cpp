@@ -19,6 +19,7 @@
 #include "GameFramework/Actor.h"
 #include "HAL/IConsoleManager.h"
 #include "Kismet/KismetMaterialLibrary.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
@@ -35,6 +36,12 @@ namespace MobSkyDebug
 		1,
 		TEXT("Shows or hides the sky dome."),
 		ECVF_Cheat);
+
+	static TAutoConsoleVariable<int32> CVarLensFlare(
+		TEXT("mob.Sky.LensFlare"),
+		1,
+		TEXT("Shows or hides the sun's lens flare, whatever the sky says."),
+		ECVF_Default);
 }
 
 namespace
@@ -47,10 +54,56 @@ namespace
 	const FName FarCloudsAName(TEXT("FarCloudsA"));
 	const FName FarCloudsBName(TEXT("FarCloudsB"));
 	const FName CloudFloorName(TEXT("CloudFloor"));
+	const FName SunPlanetName(TEXT("SunPlanet"));
+
+	const FName FlareAmountsName(TEXT("FlareAmounts"));
+	const FName FlareShapeName(TEXT("FlareShape"));
 
 	// Well inside the dome and well past the near plane. The composite draws without a depth test, so
 	// the radius only has to keep the camera inside it.
 	constexpr float CompositeRadius = 1000000.f;
+
+	/** Over every other translucency, glass and the cloud composite included: the flare is in the lens. */
+	constexpr int32 LensFlareSortPriority = 1000;
+
+	UStaticMeshComponent* SpawnCameraProxy(UWorld& World, UMaterialInterface& Material, FName Name, int32 SortPriority, TObjectPtr<AActor>& OutOwner)
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(MobSkySubsystem::SpawnCameraProxy);
+
+		UStaticMesh* Mesh = UMobSkySettings::GetProxyMesh();
+		if (!Mesh)
+		{
+			return nullptr;
+		}
+
+		FActorSpawnParameters Params;
+		Params.ObjectFlags = RF_Transient;
+#if WITH_EDITOR
+		Params.bHideFromSceneOutliner = true;
+#endif
+		OutOwner = World.SpawnActor<AActor>(Params);
+		if (!OutOwner)
+		{
+			return nullptr;
+		}
+
+		UStaticMeshComponent* Proxy = NewObject<UStaticMeshComponent>(OutOwner, Name, RF_Transient);
+		Proxy->SetStaticMesh(Mesh);
+		Proxy->SetMaterial(0, &Material);
+		Proxy->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Proxy->CastShadow = false;
+		Proxy->bNeverDistanceCull = true;
+		Proxy->bVisibleInReflectionCaptures = false;
+		Proxy->bVisibleInRayTracing = false;
+		Proxy->TranslucencySortPriority = SortPriority;
+		Proxy->SetUsingAbsoluteLocation(true);
+		Proxy->SetUsingAbsoluteRotation(true);
+		Proxy->SetUsingAbsoluteScale(true);
+		Proxy->SetWorldScale3D(FVector(CompositeRadius));
+		OutOwner->SetRootComponent(Proxy);
+		Proxy->RegisterComponent();
+		return Proxy;
+	}
 }
 
 bool UMobSkySubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
@@ -75,6 +128,13 @@ void UMobSkySubsystem::Deinitialize()
 		CompositeOwner = nullptr;
 	}
 	Composite = nullptr;
+	if (LensFlareOwner)
+	{
+		LensFlareOwner->Destroy();
+		LensFlareOwner = nullptr;
+	}
+	LensFlare = nullptr;
+	LensFlareInstance = nullptr;
 	Clouds.Reset();
 	Skies.Reset();
 	Super::Deinitialize();
@@ -82,6 +142,11 @@ void UMobSkySubsystem::Deinitialize()
 
 void UMobSkySubsystem::HideForView(FSceneView& View, bool bRenderPassView) const
 {
+	if (LensFlare && (View.bIsSceneCapture || View.bIsReflectionCapture || View.bIsPlanarReflection))
+	{
+		View.HiddenPrimitives.Add(LensFlare->GetPrimitiveSceneId());
+	}
+
 	if (!bRenderPassView)
 	{
 		if (Composite)
@@ -212,40 +277,13 @@ void UMobSkySubsystem::TickComposite(const FVector& View)
 	if (!Composite && bWanted && World)
 	{
 		UMaterialInterface* Material = GetDefault<UMobSkySettings>()->CompositeMaterial.LoadSynchronous();
-		UStaticMesh* Mesh = UMobSkySettings::GetProxyMesh();
-		if (!Material || !Mesh)
+		if (!Material)
 		{
 			return;
 		}
-
-		FActorSpawnParameters Params;
-		Params.ObjectFlags = RF_Transient;
-#if WITH_EDITOR
-		Params.bHideFromSceneOutliner = true;
-#endif
-		CompositeOwner = World->SpawnActor<AActor>(Params);
-		if (!CompositeOwner)
-		{
-			return;
-		}
-
-		Composite = NewObject<UStaticMeshComponent>(CompositeOwner, TEXT("MobCloudComposite"), RF_Transient);
-		Composite->SetStaticMesh(Mesh);
-		Composite->SetMaterial(0, Material);
-		Composite->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Composite->CastShadow = false;
-		Composite->bNeverDistanceCull = true;
-		Composite->bVisibleInReflectionCaptures = false;
-		Composite->bVisibleInRayTracing = false;
 
 		// Over the sky dome and under everything else translucent, as the marching layers were.
-		Composite->TranslucencySortPriority = 10;
-		Composite->SetUsingAbsoluteLocation(true);
-		Composite->SetUsingAbsoluteRotation(true);
-		Composite->SetUsingAbsoluteScale(true);
-		Composite->SetWorldScale3D(FVector(CompositeRadius));
-		CompositeOwner->SetRootComponent(Composite);
-		Composite->RegisterComponent();
+		Composite = SpawnCameraProxy(*World, *Material, TEXT("MobCloudComposite"), 10, CompositeOwner);
 	}
 
 	if (Composite)
@@ -488,4 +526,72 @@ void UMobSkySubsystem::Tick(float DeltaTime)
 	}
 
 	PublishFarClouds(View);
+	PublishSun(GetSky());
+	TickLensFlare(View);
+}
+
+void UMobSkySubsystem::PublishSun(const UMobSkyComponent* Sky) const
+{
+	UWorld* World = GetWorld();
+	// The fog collection rather than the sky's, so glass that already reads it can test the sun without a third.
+	UMaterialParameterCollection* Collection = GetDefault<UMobFogSettings>()->ParameterCollection.LoadSynchronous();
+	if (!World || !Collection || !Sky)
+	{
+		return;
+	}
+
+	// The cloud target only holds this frame's clouds while the composite is drawing them.
+	const float CloudsInTarget = Composite && Composite->IsVisible() ? 1.f : 0.f;
+	UKismetMaterialLibrary::SetVectorParameterValue(World, Collection, SunPlanetName,
+		FLinearColor(Sky->PlanetRadius, Sky->GroundZ, CloudsInTarget, FMath::DegreesToRadians(Sky->SunRadius)));
+}
+
+void UMobSkySubsystem::TickLensFlare(const FVector& View)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(MobSkySubsystem::TickLensFlare);
+
+	UWorld* World = GetWorld();
+	const UMobSkyComponent* Sky = GetSky();
+	const bool bWanted = Sky && Sky->bLensFlare && Sky->IsVisible() && MobSkyDebug::CVarLensFlare.GetValueOnGameThread() != 0;
+
+	if (!LensFlare && bWanted && World)
+	{
+		UMaterialInterface* Material = GetDefault<UMobSkySettings>()->LensFlareMaterial.LoadSynchronous();
+		if (!Material)
+		{
+			return;
+		}
+
+		LensFlareInstance = UMaterialInstanceDynamic::Create(Material, this);
+		LensFlare = SpawnCameraProxy(*World, *LensFlareInstance, TEXT("MobLensFlare"), LensFlareSortPriority, LensFlareOwner);
+	}
+
+	if (!LensFlare)
+	{
+		return;
+	}
+
+	LensFlare->SetVisibility(bWanted);
+	if (!bWanted)
+	{
+		return;
+	}
+
+	if (!LensFlare->GetComponentLocation().Equals(View, 1.f))
+	{
+		LensFlare->SetWorldLocation(View);
+	}
+
+	const FLinearColor Amounts(Sky->GhostAmount * Sky->FlareIntensity, Sky->HaloAmount * Sky->FlareIntensity,
+		Sky->StarburstAmount * Sky->FlareIntensity, Sky->StarburstLength);
+	const FLinearColor Shape(Sky->FlareSkyDepth, Sky->FlareEdgeMargin, 0.f, 0.f);
+	FLinearColor CurrentAmounts;
+	FLinearColor CurrentShape;
+	LensFlareInstance->GetVectorParameterValue(FMaterialParameterInfo(FlareAmountsName), CurrentAmounts);
+	LensFlareInstance->GetVectorParameterValue(FMaterialParameterInfo(FlareShapeName), CurrentShape);
+	if (!CurrentAmounts.Equals(Amounts) || !CurrentShape.Equals(Shape))
+	{
+		LensFlareInstance->SetVectorParameterValue(FlareAmountsName, Amounts);
+		LensFlareInstance->SetVectorParameterValue(FlareShapeName, Shape);
+	}
 }

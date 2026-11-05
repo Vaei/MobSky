@@ -59,6 +59,7 @@ DEFAULT_CUBE_PATH = '/Engine/EngineResources/DefaultTextureCube'
 
 CLOUD_INCLUDES = ['/MobSky/Public/MobCloud.ush']
 SKY_INCLUDES = ['/MobSky/Public/MobSky.ush']
+FLARE_INCLUDES = ['/MobSky/Public/MobLensFlare.ush']
 
 
 def _log(msg):
@@ -407,6 +408,61 @@ def build_composite_material():
 
 
 # ---------------------------------------------------------------------------
+# M_MobLensFlare
+# ---------------------------------------------------------------------------
+
+# SceneZ only marks the material as reading scene depth, which MobSunUnoccluded's lookups need.
+_CODE_LENS_FLARE = """
+FMobSun Sun = MobSunVisibility(normalize(KeyDir + float3(0.0f, 0.0f, 1e-5f)), CamZ, Planet, Planet.w,
+    Shape.x, Shape.y, CloudTex, CloudTexSampler);
+return MobLensFlare(ScreenUV, Sun, KeyColor, Amounts, TimeValue) + min(SceneZ, 0.0f) * 0.0f;
+"""
+
+
+def build_lens_flare_material():
+    mat = _get_or_create_material('M_MobLensFlare')
+    mat.set_editor_property('material_domain', unreal.MaterialDomain.MD_SURFACE)
+    mat.set_editor_property('shading_model', unreal.MaterialShadingModel.MSM_UNLIT)
+    mat.set_editor_property('blend_mode', unreal.BlendMode.BLEND_ADDITIVE)
+    mat.set_editor_property('two_sided', False)
+    mat.set_editor_property('disable_depth_test', True)
+    mat.set_editor_property('use_translucency_vertex_fog', False)
+
+    screen_uv = _expr(mat, unreal.MaterialExpressionScreenPosition, 0, 0)
+    cam_z = _mask(mat, _expr(mat, unreal.MaterialExpressionCameraPositionWS, 0, 100), 'b', 100, 100)
+    scene_z = _expr(mat, unreal.MaterialExpressionSceneDepth, 0, 200)
+    time = _expr(mat, unreal.MaterialExpressionTime, 0, 300)
+
+    fog = unreal.load_asset(FOG_COLLECTION_PATH)
+    key_dir = _mask(mat, _collection_param(mat, fog, 'KeyDirection', 0, 400), 'rgb', 100, 400)
+    key_color = _mask(mat, _collection_param(mat, fog, 'KeyColor', 0, 500), 'rgb', 100, 500)
+    planet = _collection_param(mat, fog, 'SunPlanet', 0, 600)
+
+    amounts = _vector(mat, 'FlareAmounts', (0.3, 0.025, 0.45, 0.12), '00 - Flare', 0, 700,
+                      'Ghosts, halo and starburst, and how far the starburst reaches in screen heights. The subsystem writes it from the sky.')
+    shape = _vector(mat, 'FlareShape', (10000000.0, 0.08, 0.0, 0.0), '00 - Flare', 0, 800,
+                    'Scene depth that counts as sky, and how far past the edge the sun keeps a flare.')
+    cloud_tex = _texture_object(mat, 'CloudColor', COLOR_TARGET_PATH, '00 - Flare', 0, 900,
+                                'The cloud render pass, whose coverage hides the sun.')
+
+    inputs = {'ScreenUV': screen_uv, 'CamZ': cam_z, 'SceneZ': scene_z, 'TimeValue': time, 'KeyDir': key_dir,
+              'KeyColor': key_color, 'Planet': planet, 'Amounts': amounts, 'Shape': shape, 'CloudTex': cloud_tex}
+    node = custom(mat, _CODE_LENS_FLARE, CMOT.CMOT_FLOAT3, list(inputs), [], 800, 0, 'The sun lens flare.')
+    node.set_editor_property('include_file_paths', FLARE_INCLUDES)
+    # A vector parameter's unnamed output is RGB, so the packed ones are wired through RGBA.
+    for name, expr in inputs.items():
+        link(expr, 'RGBA' if name in ('Amounts', 'Shape') else '', node, name)
+
+    MEL.connect_material_property(node, '', MP.MP_EMISSIVE_COLOR)
+
+    _spread(MEL.get_material_expressions(mat))
+    MEL.recompile_material(mat)
+    save(mat)
+    _log('M_MobLensFlare: %d nodes' % len(MEL.get_material_expressions(mat)))
+    return mat
+
+
+# ---------------------------------------------------------------------------
 # M_MobSky
 # ---------------------------------------------------------------------------
 
@@ -735,6 +791,7 @@ def build_all():
     build_render_targets()
     build_cloud_material()
     build_composite_material()
+    build_lens_flare_material()
     build_sky_material()
     build_instances()
     build_panorama_target()

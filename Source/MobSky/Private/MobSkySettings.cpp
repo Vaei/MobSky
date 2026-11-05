@@ -39,6 +39,7 @@ UMobSkySettings::UMobSkySettings()
 	ColorTarget = TSoftObjectPtr<UTextureRenderTarget2D>(FSoftObjectPath(TEXT("/MobSky/Textures/RT_MobCloudColor.RT_MobCloudColor")));
 	DepthTarget = TSoftObjectPtr<UTextureRenderTarget2D>(FSoftObjectPath(TEXT("/MobSky/Textures/RT_MobCloudDepth.RT_MobCloudDepth")));
 	CompositeMaterial = MaterialAt(TEXT("M_MobCloudComposite"));
+	LensFlareMaterial = MaterialAt(TEXT("M_MobLensFlare"));
 	ProxyMesh = TSoftObjectPtr<UStaticMesh>(
 		FSoftObjectPath(TEXT("/MobLights/Meshes/SM_MobLightProxy_Sphere.SM_MobLightProxy_Sphere")));
 }
